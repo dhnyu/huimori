@@ -23,17 +23,26 @@ rule preprocess_landuse:
           (or snakemake.params.year) to decide which year to process.
     """
     input:
-        landuse_files=lambda wc: [
-            os.path.join(config["data_dir"], config["landuse_dir"], f)
-            for f in os.listdir(os.path.join(config["data_dir"], config["landuse_dir"]))
-            if f.endswith(".tif")
-        ]
+        landuse_files=os.path.join(config["data_dir"], config["landuse_dir"], "lc_glc_fcs30d_30m_{year}.tif")
+        # landuse_files=lambda wc: [
+        #     os.path.join(config["data_dir"], config["landuse_dir"], f)
+        #     for f in os.listdir(os.path.join(config["data_dir"], config["landuse_dir"]))
+        #     if f.endswith(".tif")
+        # ]
     output:
         freq_raster=os.path.join(config["output_dir"], "landuse_freq_{year}.tif")
     params:
         year=lambda wc: wc.year
-    script:
-        "scripts/preprocess_landuse.py"
+    shell:
+        """
+        ../../rust_tools/geotiff_focal_mean/target/release/focal-mean \
+            --input {input.landuse_files} \
+            --output {output.freq_raster} \
+            --radius 67 --radius-in-cells \
+            --compression DEFLATE --cog \
+            --tile-size 512 --threads 22 \
+            --verbose --chunksize 2048
+        """
 
 
 rule preprocess_mtpi:
@@ -86,8 +95,6 @@ rule calc_features_monitors:
         watersheds=os.path.join(config["data_dir"], config["files"]["watersheds"])
     params:
         road_dir=os.path.join(config["data_dir"], config["road_dir"]),
-        # landuse_freq_{year}.tif 들이 output_dir에 생기므로, 스크립트가 필요한 year를 읽게 하려면
-        # 스크립트에서 year를 별도로 받도록(예: params.year) 바꾸는 편이 가장 안전합니다.
         landuse_dir=config["output_dir"]
     output:
         features=os.path.join(config["output_dir"], "features_monitors_{type}.parquet")

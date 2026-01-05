@@ -112,6 +112,10 @@ focal-mean \
   --radius 1000 \
   --nodata -9999 \
   --threads 4 \
+  --chunksize 1024 \
+  --compression DEFLATE \
+  --cog \
+  --tile-size 512 \
   --verbose
 ```
 

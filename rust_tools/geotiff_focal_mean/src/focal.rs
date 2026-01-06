@@ -27,6 +27,7 @@ pub fn calculate_focal_means(
     data: &Array2<i32>,
     radius_in_cells: usize,
     nodata: Option<i32>,
+    classes_to_process: Option<&[i32]>,
 ) -> Result<(Vec<Array2<f32>>, Vec<i32>)> {
     if radius_in_cells == 0 {
         return Err(FocalMeanError::InvalidRadius(0.0));
@@ -34,13 +35,18 @@ pub fn calculate_focal_means(
 
     info!("Using window radius of {} cells", radius_in_cells);
 
-    // Extract unique classes
-    let classes = extract_classes(data, nodata);
+    // Determine classes to process
+    let classes = if let Some(provided_classes) = classes_to_process {
+        provided_classes.to_vec()
+    } else {
+        extract_classes(data, nodata)
+    };
+
     if classes.is_empty() {
         return Err(FocalMeanError::NoValidClasses);
     }
 
-    info!("Found {} unique classes: {:?}", classes.len(), classes);
+    info!("Processing {} classes: {:?}", classes.len(), classes);
 
     // Process each class in parallel
     let class_fractions: Vec<Array2<f32>> = classes
@@ -89,8 +95,7 @@ fn calculate_class_fraction(
     Array2::from_shape_vec((nrows, ncols), flat_data).expect("Shape mismatch")
 }
 
-/// Compute the fraction of target_class within a square window centered at (center_row, center_col)
-/// This matches scipy.ndimage.uniform_filter behavior
+/// Compute the fraction of target_class within a circular window centered at (center_row, center_col)
 fn compute_window_fraction(
     data: &Array2<i32>,
     center_row: usize,
@@ -102,8 +107,9 @@ fn compute_window_fraction(
     let (nrows, ncols) = data.dim();
     let mut class_count = 0u32;
     let mut valid_count = 0u32;
+    let radius_sq = (radius as isize).pow(2);
 
-    // Define square window bounds
+    // Define square bounds for iteration, then filter for circle
     let row_min = center_row.saturating_sub(radius);
     let row_max = (center_row + radius + 1).min(nrows);
     let col_min = center_col.saturating_sub(radius);
@@ -111,6 +117,13 @@ fn compute_window_fraction(
 
     for r in row_min..row_max {
         for c in col_min..col_max {
+            // Check if cell is within circular radius
+            let dr = r as isize - center_row as isize;
+            let dc = c as isize - center_col as isize;
+            if dr * dr + dc * dc > radius_sq {
+                continue;
+            }
+
             let value = data[[r, c]];
 
             // Skip nodata values
@@ -154,11 +167,24 @@ mod tests {
         // Test nodata exclusion from denominator
         let data = arr2(&[[1, 2, -9999], [2, 1, 2], [1, 2, 1]]);
         let fraction = compute_window_fraction(&data, 1, 1, 1, 1, Some(-9999));
-        // 4 cells are class 1: (0,0), (1,1), (2,0), (2,2)
-        // 4 cells are class 2: (0,1), (1,0), (1,2), (2,1)
-        // 1 nodata cell: (0,2)
-        // Fraction = 4/8 = 0.5
-        assert!((fraction - 0.5).abs() < 1e-6);
+        
+        // With radius 1 (circular), corners are excluded.
+        // Grid:
+        // (0,0) [dist^2=2 > 1] -> Excluded (was 1)
+        // (0,1) [dist^2=1] -> Included (val 2)
+        // (0,2) [dist^2=2 > 1] -> Excluded (was -9999, but would be excluded by circle anyway)
+        // (1,0) [dist^2=1] -> Included (val 2)
+        // (1,1) [dist^2=0] -> Included (val 1)
+        // (1,2) [dist^2=1] -> Included (val 2)
+        // (2,0) [dist^2=2 > 1] -> Excluded (was 1)
+        // (2,1) [dist^2=1] -> Included (val 2)
+        // (2,2) [dist^2=2 > 1] -> Excluded (was 1)
+        
+        // Included values: 2, 2, 1, 2, 2
+        // Total valid: 5
+        // Class 1 count: 1 (center)
+        // Fraction: 1/5 = 0.2
+        assert!((fraction - 0.2).abs() < 1e-6);
     }
 
     #[test]

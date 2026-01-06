@@ -125,7 +125,7 @@ fn process_full_raster(
 
     // Calculate focal means
     info!("Calculating focal means...");
-    let (class_fractions, classes) = focal::calculate_focal_means(&data, radius_in_cells, nodata_value)?;
+    let (class_fractions, classes) = focal::calculate_focal_means(&data, radius_in_cells, nodata_value, None)?;
 
     info!("Found {} classes: {:?}", classes.len(), classes);
 
@@ -224,8 +224,9 @@ fn process_chunked(
         let chunk_data = io::read_padded_chunk(input_dataset, &bounds)?;
 
         // Calculate focal means for this chunk
+        // Pass global classes to ensure consistent output bands
         let (chunk_fractions, _) =
-            focal::calculate_focal_means(&chunk_data, radius_in_cells, nodata_value)?;
+            focal::calculate_focal_means(&chunk_data, radius_in_cells, nodata_value, Some(&classes))?;
 
         // Extract central region (remove padding) and write to output
         for (band_idx, chunk_fraction) in chunk_fractions.iter().enumerate() {

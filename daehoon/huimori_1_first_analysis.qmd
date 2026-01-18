@@ -1,0 +1,425 @@
+---
+title: "huimori_1_first_analysis"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: show
+    code-summary: "코드 보기"
+    code-overflow: wrap
+    number-sections: true
+    smooth-scroll: true
+    embed-resources: true
+    df-print: paged
+    page-layout: full
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(sf)
+library(data.table)
+library(terra)
+library(ncdf4)
+library(exactextractr)
+library(future)
+library(future.apply)
+library(future.mirai)
+library(readxl)
+library(arrow)
+```
+
+# 측정소 데이터
+
+```{r}
+file_path <- "raw_data_files/sites_history_cleaning_20250311.xlsx"
+sites <- read_excel(file_path)
+
+sites_2020 <- sites %>%
+  filter(year == 2020) %>%
+  select(TMSID, year, site_type, longitude_common, latitude_common)
+
+sites_2020_sf <- st_as_sf(sites_2020, 
+                     coords = c("longitude_common", "latitude_common"), 
+                     crs = 4326)
+```
+
+# 환경변수 데이터
+
+## ERA5-Land
+
+```{r}
+# 1. 시간 시퀀스 생성 (누락되었던 부분)
+start_t <- as.POSIXct("2020-01-01 00:00:00", tz = "UTC")
+time_seq <- seq(from = start_t, by = "hour", length.out = 8784)
+formatted_time <- format(time_seq, "%Y%m%d_%H")
+
+# 2. 파일 경로 설정 및 압축 해제 확인
+temp_root <- file.path(tempdir(), "era5_unpack")
+zip_files <- sort(list.files("ERA5_Land", pattern = "\\.zip$", full.names = TRUE))
+
+# 만약 디렉토리가 비어있다면 압축 해제 재수행 (Quarto 렌더링 대비)
+if (!dir.exists(temp_root) || length(list.files(temp_root)) == 0) {
+  dir.create(temp_root, showWarnings = FALSE, recursive = TRUE)
+  for (i in seq_along(zip_files)) {
+    target_dir <- file.path(temp_root, paste0("vol_", i))
+    dir.create(target_dir, showWarnings = FALSE)
+    unzip(zip_files[i], files = "data_0.nc", exdir = target_dir)
+  }
+}
+
+nc_files <- list.files(temp_root, pattern = "data_0.nc$", recursive = TRUE, full.names = TRUE)
+nc_files <- nc_files[order(as.numeric(gsub(".*vol_(\\d+).*", "\\1", nc_files)))]
+
+# 3. 변수별 루프
+var_names_unique <- c("t2m", "ssr", "u10", "v10", "sp", "tp")
+
+for (v in var_names_unique) {
+  message(paste("Processing and Memory-Loading variable:", v))
+  
+  v_list <- lapply(nc_files, function(f) {
+    r <- rast(f)
+    # 패턴 매칭으로 안전하게 인덱스 추출
+    idx <- grep(v, names(r))
+    if (length(idx) == 0) return(NULL)
+    
+    target_layer <- r[[idx]]
+    return(target_layer * 1) # 메모리 강제 로드
+  })
+  
+  # NULL 요소 제거 (subscript out of bounds 에러 방지 핵심)
+  v_list <- v_list[!sapply(v_list, is.null)]
+  
+  if (length(v_list) > 0) {
+    combined_v_rast <- rast(v_list)
+    
+    # 레이어 이름 설정 (8784개 일치 확인)
+    if (nlyr(combined_v_rast) == length(formatted_time)) {
+      names(combined_v_rast) <- paste0(v, "_", formatted_time)
+    }
+    
+    assign(paste0(v, "_raster"), combined_v_rast, envir = .GlobalEnv)
+    
+    sample_val <- global(combined_v_rast[[1]], "mean", na.rm = TRUE)$mean
+    message(paste(v, "평균값 확인:", sample_val))
+  }
+  
+  rm(combined_v_rast, v_list)
+  gc()
+}
+```
+
+### 결합테스트 (10m 버퍼)
+
+```{r}
+#| eval: false
+
+# 1. 대상 변수 및 래스터 객체 매핑
+target_rasters <- list(
+  t2m = t2m_raster, ssr = ssr_raster, u10 = u10_raster, 
+  v10 = v10_raster, sp = sp_raster, tp = tp_raster
+)
+
+# 2. 추출 루프 수행
+for (v_name in names(target_rasters)) {
+  message(paste("Extracting values for variable:", v_name))
+  
+  # 해당 변수 래스터 로드
+  curr_raster <- target_rasters[[v_name]]
+  
+  # exact_extract 수행 (면적 가중 평균)
+  extracted_raw <- exact_extract(curr_raster, sites_buffer_10m, fun = "mean", progress = TRUE)
+  setDT(extracted_raw)
+  
+  # 컬럼명 정제: 'mean.' 접두사 제거
+  setnames(extracted_raw, old = names(extracted_raw), 
+           new = gsub("mean.", "", names(extracted_raw)))
+  
+  # 측정소 기본 정보와 결합
+  # sites_2020_sf 객체의 속성 정보를 그대로 가져옴
+  base_info <- as.data.table(st_drop_geometry(sites_2020_sf))
+  final_dt <- cbind(base_info, extracted_raw)
+  
+  # 전역 변수로 할당 (t2m_10m, ssr_10m 등)
+  assign(paste0(v_name, "_10m_era5_land_2020"), final_dt, envir = .GlobalEnv)
+  
+  # 메모리 정리
+  rm(extracted_raw, final_dt)
+  gc()
+}
+
+# 3. 최종 결과 상단 확인
+print(t2m_10m_era5_land_2020[1:5, 1:6])
+```
+
+### 다양한 버퍼 시나리오
+
+```{r}
+# 1. 대상 버퍼 거리 정의
+buffer_distances <- c(10, 50, 100, 500, 1000, 5000, 10000)
+
+# 2. 래스터 객체 리스트 준비
+raster_objs <- list(
+  t2m = t2m_raster, ssr = ssr_raster, u10 = u10_raster, 
+  v10 = v10_raster, sp = sp_raster, tp = tp_raster
+)
+
+# 3. 중첩 루프: 버퍼 거리별 -> 변수별 추출
+for (dist in buffer_distances) {
+  message(paste0("\n>>> Processing Buffer Distance: ", dist, "m <<<"))
+  
+  # 해당 거리의 버퍼 sf 객체 생성
+  temp_buffer <- sites_2020_sf %>%
+    st_transform(5186) %>%
+    st_buffer(dist = dist) %>%
+    st_transform(st_crs(t2m_raster))
+  
+  for (v_name in names(raster_objs)) {
+    message(paste("   Variable:", v_name))
+    
+    # 추출 수행
+    extracted <- exact_extract(raster_objs[[v_name]], temp_buffer, fun = "mean", progress = FALSE)
+    setDT(extracted)
+    
+    # 이름 정제 및 결합
+    setnames(extracted, old = names(extracted), new = gsub("mean.", "", names(extracted)))
+    base_info <- as.data.table(st_drop_geometry(sites_2020_sf))
+    final_dt <- cbind(base_info, extracted)
+    
+    # 동적 변수명 할당 (예: t2m_50m, ssr_100m 등)
+    assign(paste0(v_name, "_", dist, "m_era5_land_2020"), final_dt, envir = .GlobalEnv)
+    
+    rm(extracted, final_dt)
+  }
+  rm(temp_buffer)
+  gc() # 메모리 해제
+}
+
+print(t2m_10m_era5_land_2020[1:5,1:10])
+print(ssr_10m_era5_land_2020[1:5,1:10])
+print(u10_10m_era5_land_2020[1:5,1:10])
+print(v10_10m_era5_land_2020[1:5,1:10])
+print(sp_10m_era5_land_2020[1:5,1:10])
+print(tp_10m_era5_land_2020[1:5,1:10])
+
+print(t2m_50m_era5_land_2020[1:5,1:10])
+print(ssr_50m_era5_land_2020[1:5,1:10])
+print(u10_50m_era5_land_2020[1:5,1:10])
+print(v10_50m_era5_land_2020[1:5,1:10])
+print(sp_50m_era5_land_2020[1:5,1:10])
+print(tp_50m_era5_land_2020[1:5,1:10])
+
+print(t2m_100m_era5_land_2020[1:5,1:10])
+print(ssr_100m_era5_land_2020[1:5,1:10])
+print(u10_100m_era5_land_2020[1:5,1:10])
+print(v10_100m_era5_land_2020[1:5,1:10])
+print(sp_100m_era5_land_2020[1:5,1:10])
+print(tp_100m_era5_land_2020[1:5,1:10])
+
+print(t2m_500m_era5_land_2020[1:5,1:10])
+print(ssr_500m_era5_land_2020[1:5,1:10])
+print(u10_500m_era5_land_2020[1:5,1:10])
+print(v10_500m_era5_land_2020[1:5,1:10])
+print(sp_500m_era5_land_2020[1:5,1:10])
+print(tp_500m_era5_land_2020[1:5,1:10])
+
+print(t2m_1000m_era5_land_2020[1:5,1:10])
+print(ssr_1000m_era5_land_2020[1:5,1:10])
+print(u10_1000m_era5_land_2020[1:5,1:10])
+print(v10_1000m_era5_land_2020[1:5,1:10])
+print(sp_1000m_era5_land_2020[1:5,1:10])
+print(tp_1000m_era5_land_2020[1:5,1:10])
+
+print(t2m_5000m_era5_land_2020[1:5,1:10])
+print(ssr_5000m_era5_land_2020[1:5,1:10])
+print(u10_5000m_era5_land_2020[1:5,1:10])
+print(v10_5000m_era5_land_2020[1:5,1:10])
+print(sp_5000m_era5_land_2020[1:5,1:10])
+print(tp_5000m_era5_land_2020[1:5,1:10])
+
+print(t2m_10000m_era5_land_2020[1:5,1:10])
+print(ssr_10000m_era5_land_2020[1:5,1:10])
+print(u10_10000m_era5_land_2020[1:5,1:10])
+print(v10_10000m_era5_land_2020[1:5,1:10])
+print(sp_10000m_era5_land_2020[1:5,1:10])
+print(tp_10000m_era5_land_2020[1:5,1:10])
+```
+
+## Chelsa
+
+```{r}
+chelsa_files <- sort(list.files("Chelsa", pattern = "\\.nc$", full.names = TRUE))
+
+all_vars <- unique(unlist(lapply(chelsa_files, function(f) names(rast(f)))))
+message("검출된 고유 변수 목록: ", paste(all_vars, collapse = ", "))
+```
+
+```{r}
+# 1. 대상 정상 변수 목록 정의
+valid_vars <- c("rsds", "tas", "tasmax", "tasmin")
+
+# 2. 변수별 통합 루프
+for (v in valid_vars) {
+  message(paste("Processing CHELSA variable:", v))
+  
+  # 12개 파일에서 해당 변수(v)로 시작하는 모든 레이어를 순서대로 수집
+  # 예: tas_1, tas_2 ... tas_31 등을 모든 월에서 추출
+  v_list <- lapply(chelsa_files, function(f) {
+    r <- rast(f)
+    # 변수명 뒤에 숫자가 붙은 패턴(예: tas_1)을 찾아 레이어 인덱스 확보
+    target_indices <- grep(paste0("^", v, "_"), names(r))
+    
+    if(length(target_indices) > 0) {
+      # 해당 월의 레이어들만 추출
+      return(r[[target_indices]])
+    } else {
+      return(NULL)
+    }
+  })
+  
+  # NULL 제외 및 통합
+  v_list <- v_list[!sapply(v_list, is.null)]
+  combined_v_rast <- rast(v_list)
+  
+  # 레이어 이름 재설정 (YYYYMMDD 형식 생성)
+  # 2020년 윤년 기준 366일 날짜 시퀀스 생성
+  chelsa_dates <- seq(as.Date("2020-01-01"), as.Date("2020-12-31"), by="day")
+  formatted_dates <- format(chelsa_dates, "%Y%m%d")
+  
+  # 결합된 레이어 수와 날짜 수가 맞는지 확인 후 이름 부여
+  if(nlyr(combined_v_rast) == length(formatted_dates)) {
+    names(combined_v_rast) <- paste0(v, "_", formatted_dates)
+  }
+  
+  # 전역 변수 할당 (tas_raster, rsds_raster 등)
+  assign(paste0(v, "_raster"), combined_v_rast, envir = .GlobalEnv)
+  
+  message(paste(v, "통합 완료: 총", nlyr(combined_v_rast), "레이어 생성"))
+  
+  rm(combined_v_rast, v_list)
+  gc()
+}
+
+# 3. 결과 확인
+print(tas_raster)
+```
+
+### 버퍼 시나리오
+
+```{r}
+# 1. 대상 버퍼 거리 및 변수 리스트 정의
+buffer_distances <- c(10, 50, 100, 500, 1000, 5000, 10000)
+
+# CHELSA 정상 변수 래스터 객체 매핑
+chelsa_raster_objs <- list(
+  tas = tas_raster,
+  rsds = rsds_raster,
+  tasmax = tasmax_raster,
+  tasmin = tasmin_raster
+)
+
+# 2. 중첩 루프: 버퍼 거리별 -> 변수별 추출
+for (dist in buffer_distances) {
+  message(paste0("\n>>> Processing CHELSA Buffer Distance: ", dist, "m <<<"))
+  
+  # 해당 거리의 버퍼 sf 객체 생성 (CHELSA 좌표계 기준)
+  # EPSG:5186에서 버퍼 생성 후 래스터 좌표계로 변환
+  temp_buffer <- sites_2020_sf %>%
+    st_transform(5186) %>%
+    st_buffer(dist = dist) %>%
+    st_transform(st_crs(tas_raster))
+  
+  for (v_name in names(chelsa_raster_objs)) {
+    message(paste("   Variable:", v_name))
+    
+    # 해당 래스터 객체 로드
+    curr_raster <- chelsa_raster_objs[[v_name]]
+    
+    # exact_extract 수행 (면적 가중 평균)
+    extracted <- exact_extract(curr_raster, temp_buffer, fun = "mean", progress = FALSE)
+    setDT(extracted)
+    
+    # 컬럼명 정제: 'mean.' 접두사 제거
+    setnames(extracted, old = names(extracted), new = gsub("mean.", "", names(extracted)))
+    
+    # 측정소 기본 정보와 결합
+    base_info <- as.data.table(st_drop_geometry(sites_2020_sf))
+    final_dt <- cbind(base_info, extracted)
+    
+    # 동적 변수명 할당 (예: tas_10m_chelsa_2020)
+    assign(paste0(v_name, "_", dist, "m_chelsa_2020"), final_dt, envir = .GlobalEnv)
+    
+    rm(extracted, final_dt)
+  }
+  rm(temp_buffer)
+  gc() # 메모리 관리
+}
+
+# 3. 추출 결과 확인 (예시: tas 10m 버퍼)
+message("\n--- CHELSA Extraction Complete ---")
+print(tas_10m_chelsa_2020[1:5,1:10])
+print(rsds_10m_chelsa_2020[1:5,1:10])
+print(tasmax_10m_chelsa_2020[1:5,1:10])
+print(tasmin_10m_chelsa_2020[1:5,1:10])
+
+print(tas_50m_chelsa_2020[1:5,1:10])
+print(rsds_50m_chelsa_2020[1:5,1:10])
+print(tasmax_50m_chelsa_2020[1:5,1:10])
+print(tasmin_50m_chelsa_2020[1:5,1:10])
+
+print(tas_100m_chelsa_2020[1:5,1:10])
+print(rsds_100m_chelsa_2020[1:5,1:10])
+print(tasmax_100m_chelsa_2020[1:5,1:10])
+print(tasmin_100m_chelsa_2020[1:5,1:10])
+
+print(tas_500m_chelsa_2020[1:5,1:10])
+print(rsds_500m_chelsa_2020[1:5,1:10])
+print(tasmax_500m_chelsa_2020[1:5,1:10])
+print(tasmin_500m_chelsa_2020[1:5,1:10])
+
+print(tas_1000m_chelsa_2020[1:5,1:10])
+print(rsds_1000m_chelsa_2020[1:5,1:10])
+print(tasmax_1000m_chelsa_2020[1:5,1:10])
+print(tasmin_1000m_chelsa_2020[1:5,1:10])
+
+print(tas_5000m_chelsa_2020[1:5,1:10])
+print(rsds_5000m_chelsa_2020[1:5,1:10])
+print(tasmax_5000m_chelsa_2020[1:5,1:10])
+print(tasmin_5000m_chelsa_2020[1:5,1:10])
+
+print(tas_10000m_chelsa_2020[1:5,1:10])
+print(rsds_10000m_chelsa_2020[1:5,1:10])
+print(tasmax_10000m_chelsa_2020[1:5,1:10])
+print(tasmin_10000m_chelsa_2020[1:5,1:10])
+```
+
+## 결과 저장
+
+```{r}
+save_dir <- "extracted_climate_parquet"
+if (!dir.exists(save_dir)) dir.create(save_dir)
+
+era5_objs <- ls(pattern = "_era5_land_2020$")
+chelsa_objs <- ls(pattern = "_chelsa_2020$")
+all_target_objs <- c(era5_objs, chelsa_objs)
+
+message(paste("총", length(all_target_objs), "개의 객체를 저장합니다."))
+# 3. 저장 루프 수행
+for (obj_name in all_target_objs) {
+  # 객체 이름으로부터 실제 데이터 호출
+  dt <- get(obj_name)
+  
+  # 파일 경로 설정
+  file_path <- file.path(save_dir, paste0(obj_name, ".parquet"))
+  
+  # Parquet 저장 (Snappy 압축 기본 적용)
+  write_parquet(dt, file_path)
+  
+  # 메모리 효율을 위해 저장 완료 메시지 출력 (선택 사항)
+  # message(paste("저장 완료:", file_path))
+}
+
+message("\n모든 기상 데이터가 Parquet 형식으로 성공적으로 저장되었습니다.")
+```

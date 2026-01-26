@@ -340,7 +340,7 @@ list_process_split <-
       iteration = "list"
     ),
     targets::tar_target(
-      list_pred_calc_grid_old,
+      name = list_pred_calc_grid_old,
       command = {
         grid_unit <- sf::st_bbox(sf_grid_correct_split[int_split_grid_ids, ])
         sf::st_as_sf(

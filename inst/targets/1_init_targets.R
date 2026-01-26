@@ -5,14 +5,14 @@ list_configs <-
       name = chr_dir_data,
       command = {
         if (Sys.getenv("USER") == "isong") {
-          file.path("/mnt/s", "Korea")
+          file.path("/mnt/hdd001", "Korea")
         } else {
-          file.path(Sys.getenv("HOME"), "Documents")
+          file.path("/mnt/hdd001", "Korea")
         }
       }
     ),
     targets::tar_target(
       name = chr_dir_git,
-      command = file.path(Sys.getenv("HOME"), "GitHub", "histmap-ko")
+      command = file.path(Sys.getenv("HOME"), "histmap-ko")
     )
   )

@@ -25,38 +25,22 @@ library(terra)
 library(ncdf4)
 library(httr)
 library(exactextractr)
-library(future)
-library(future.apply)
-library(future.mirai)
+library(huimori)
 library(readxl)
 library(arrow)
-
-# 측정소 데이터
-
-file_path <- "raw_data_files/sites_history_cleaning_20250311.xlsx"
-sites <- read_excel(file_path)
-
-sites_2020 <- sites %>%
-  filter(year == 2020) %>%
-  select(TMSID, year, site_type, longitude_common, latitude_common, date_start, date_end)
-
-sites_2020_sf <- st_as_sf(sites_2020, 
-                     coords = c("longitude_common", "latitude_common"), 
-                     crs = 4326)
+library(stringi)
+library(plyr)
+library(chopin)
+library(geosphere)
 ```
 
 # 경로 정리
 
-## 작업 위치 경로
-
 ```{r}
+# 작업위치 경로
 chr_dir_huimori <- file.path(Sys.getenv("HOME"), "huimori")
 setwd(chr_dir_huimori)
-```
 
-## 기존 데이터 경로
-
-```{r}
 # 절대경로
 chr_dir_data <- "/mnt/hdd001/Korea"
 chr_dir_git <- file.path(Sys.getenv("HOME"), "histmap-ko")
@@ -87,9 +71,9 @@ chr_korea_watershed <- file.path(chr_dir_data, "watersheds", "data", "watershed-
 
 # 지형(multi-scale topographic position index)
 chr_mtpi_file <- file.path(chr_dir_data, "elevation", "kngii_90m_mtpi.tif")
-chr_mtpi_1km_file <- terra::rast(chr_mtpi_file) %>% 
-  terra::aggregate(fact = 11, fun = "mean", na.rm = TRUE) %>% 
-  terra::writeRaster(file.path(chr_dir_data, "elevation", "kngii_1km_mtpi.tif"), overwrite = TRUE) %>% 
+chr_mtpi_1km_file <- terra::rast(chr_mtpi_file) |> 
+  terra::aggregate(fact = 11, fun = "mean", na.rm = TRUE) |> 
+  terra::writeRaster(file.path(chr_dir_data, "elevation", "kngii_1km_mtpi.tif"), overwrite = TRUE) |> 
   terra::sources()
 
 # 토지피복 빈도
@@ -107,43 +91,275 @@ chr_file_emission_locs <- file.path(chr_dir_data, "emission", "data", "emission_
 
 # 한국지도
 geodata::geodata_path(file.path("~", "geodatacache"))
-sf_korea_all <- geodata::gadm(country = "KOR", level = 0) %>%
-  sf::st_as_sf() %>%
+sf_korea_all <- geodata::gadm(country = "KOR", level = 0) |>
+  sf::st_as_sf() |>
   sf::st_transform("EPSG:5179")
-```
-
-
-## 기후변수 경로
-
-```{r}
-chr_dir_climate <- "/mnt/hdd001/huimori"
 
 # 기후기상
+chr_dir_climate <- "/mnt/hdd001/huimori"
 chr_ERA5_Land_file <- list.files(file.path(chr_dir_climate, "ERA5_Land"), pattern = "\\.nc$", full.names = TRUE)
 chr_CHELSA_files <- list.files(file.path(chr_dir_climate, "Chelsa"), pattern = "\\.nc$", full.names = TRUE)
 ```
 
-# 
 
+# 기존 변수 점검
+
+## 측정소 데이터 생성
+
+의존하는 `dt_measurements`, `sf_monitors_base`, `sf_monitors_correct` 생성
 
 ```{r}
-targets::tar_target(
-      name = chr_mtpi_1km_file,
-      command = {
-        mtpi <- terra::rast(chr_mtpi_file)
-        mtpi_1km <- terra::aggregate(mtpi, fact = 11, fun = mean, na.rm = TRUE)
-        out_file <- file.path(chr_dir_data, "elevation", "kngii_1km_mtpi.tif")
-        terra::writeRaster(mtpi_1km, out_file, overwrite = TRUE)
-        out_file
-      },
-      format = "file"
-    )
+dt_measurements <- nanoparquet::read_parquet(chr_measurement_file)
+
+# 1. 데이터 읽기
+sites <- readxl::read_excel(chr_monitors_file)
+
+# 2. 데이터 클리닝 및 전처리
+sites_c <- sites |>
+  dplyr::filter(!grepl("(광화학|중금속|산성|유해)", site_type)) |>
+  dplyr::arrange(TMSID, site_type, year) |>
+  dplyr::filter(!grepl("\\-[1-9]$", TMSID)) |>
+  dplyr::ungroup() |>
+  # pre-cleaning: detect max year
+  dplyr::group_by(TMSID, site_type) |>
+  dplyr::mutate(year_max = max(year)) |>
+  dplyr::ungroup() |>
+  # distinct rows by selected fields
+  dplyr::distinct(
+    TMSID, date_start, date_end, coords_google, floor,
+    .keep_all = TRUE
+  ) |>
+  dplyr::mutate(
+    date_start = as.POSIXct(date_start, tz = "Asia/Seoul"),
+    date_end = as.POSIXct(date_end, tz = "Asia/Seoul")
+  ) |>
+  dplyr::group_by(TMSID) |>
+  # Assign first and last row
+  dplyr::mutate(
+    date_start = replace(date_start, dplyr::row_number() == 1, unique(fill_date(date_start, min(year), TRUE))),
+    date_end = replace(date_end, dplyr::row_number() == dplyr::n(), unique(fill_date(date_end, max(year_max), start = FALSE)))
+  ) |>
+  # if no location changes were detected and date_start and date_end are NAs,
+  # use the minimum year to assign date_start and the maximum year to assign date_end.
+  dplyr::mutate(
+    date_start = ifelse(dplyr::n() == 1 & is.na(date_start), as.POSIXct(sprintf("%d0101010000", year), format = "%Y%m%d%H%M%S", tz = "Asia/Seoul"), date_start),
+    date_end = ifelse(dplyr::n() == 1 & is.na(date_end), as.POSIXct(sprintf("%d1231230000", year_max), format = "%Y%m%d%H%M%S", tz = "Asia/Seoul"), date_end)
+  ) |>
+  dplyr::filter(!(is.na(date_start) & is.na(date_end))) |>
+  dplyr::mutate(
+    date_end = ifelse(is.na(date_end), dplyr::lead(date_end), date_end)
+  ) |>
+  dplyr::ungroup() |>
+  dplyr::filter(!is.na(date_start)) |>
+  dplyr::mutate(
+    date_start = as.POSIXct(date_start, tz = "Asia/Seoul"),
+    date_end = as.POSIXct(date_end, tz = "Asia/Seoul")
+  )
+
+# 3. Lookup 테이블 정의
+check_lookup <- c("[도시대기측정망]", "[도로변대기측정망]", "[PM2.5성분측정망]", "[교외대기측정망]",
+                  "[항만측정망]", "[국가배경농도(도서)측정망]", "[대기오염집중측정망]")
+target_lookup <- c("Urban", "Roadside", "PM2.5", "Suburban",
+                   "Port", "Island", "Concentrated")
+
+# 4. 최종 결과 생성 (sf_monitors_base)
+sf_monitors_base <- sites_c |>
+  dplyr::select(TMSID, site_type, dplyr::starts_with("date_"), dplyr::starts_with("coords_google")) |>
+  dplyr::distinct() |>
+  dplyr::rowwise() |>
+  dplyr::mutate(
+    lon = as.numeric(stringi::stri_split_fixed(coords_google, pattern = ", ")[[1]][2]),
+    lat = as.numeric(stringi::stri_split_fixed(coords_google, pattern = ", ")[[1]][1])
+  ) |>
+  dplyr::ungroup() |>
+  dplyr::mutate(
+    site_type = sub(" ", "", site_type),
+    site_type = plyr::mapvalues(site_type, check_lookup, target_lookup),
+    site_type = factor(site_type, levels = target_lookup[c(1, 2, 4, 5, 3, 6, 7)])
+  ) |>
+  dplyr::group_by(TMSID) |>
+  dplyr::mutate(TMSID2 = paste0(TMSID, LETTERS[seq_len(length(TMSID))])) |>
+  dplyr::ungroup()
+
+# 1. 연간 요약 데이터 생성
+# dt_measurements가 메모리에 로드되어 있어야 함
+ak_sites_annual <- huimori::summarize_annual(
+  data = dt_measurements,
+  timeflag = "date"
+)
+
+# 2. 측정소 이전 거리(Relocation distance) 계산
+sites_cfd <- sf_monitors_base |>
+  dplyr::arrange(TMSID, date_start) |>
+  dplyr::group_by(TMSID) |>
+  dplyr::mutate(lon2 = lag(lon), lat2 = lag(lat)) |>
+  dplyr::rowwise() |>
+  dplyr::mutate(
+    dist_m = geosphere::distGeo(c(lon, lat), c(lon2, lat2))
+  ) |>
+  dplyr::ungroup()
+
+# 3. 시공간 범위 확장 (연도별 전개)
+sites_fullrange <- sites_cfd |>
+  dplyr::group_by(TMSID, TMSID2) |>
+  dplyr::filter(!is.na(date_start) & !is.na(date_end)) |>
+  tidyr::nest() |>
+  dplyr::mutate(
+    year_all = purrr::map(data, function(df) {
+      ystart <- lubridate::year(df$date_start)
+      yend   <- lubridate::year(df$date_end)
+      data.frame(year = seq(ystart, yend))
+    })
+  ) |>
+  tidyr::unnest(cols = c(year_all, data)) |>
+  dplyr::ungroup()
+
+# 4. 공간 데이터(sf) 변환 및 측정 데이터 결합
+sf_monitors_correct <- sites_fullrange |>
+  dplyr::filter(!is.na(lon)) |>
+  sf::st_as_sf(
+    coords = c("lon", "lat"),
+    crs = 4326
+  ) |>
+  sf::st_transform(5179) |>
+  dplyr::full_join(
+    ak_sites_annual,
+    by = c("TMSID", "TMSID2", "year")
+  ) |>
+  dplyr::filter(!sf::st_is_empty(geometry))
+```
+
+## 변수 생성
+
+```{r}
+## 도로와의 거리 `df_feat_correct_d_road`
+target_road_file <- chr_road_files[length(chr_road_files)]
+road <- sf::st_read(target_road_file, quiet = TRUE) |>
+  sf::st_transform(sf::st_crs(sf_monitors_correct)) |>
+  dplyr::filter(!ROAD_TYPE %in% c("002", "004") & ROAD_USE == 0)
+
+nearest_idx <- sf::st_nearest_feature(
+  x = sf_monitors_correct,
+  y = road
+)
+road_nearest <- road[nearest_idx, ]
+dist_road_nearest <- sf::st_distance(
+  x = sf_monitors_correct,
+  y = road_nearest,
+  by_element = TRUE
+)
+df_feat_correct_d_road <- sf_monitors_correct |>
+  dplyr::select(TMSID, TMSID2, year) |>
+  dplyr::mutate(
+    d_road = dist_road_nearest
+  ) |> sf::st_drop_geometry()
+df_feat_correct_d_road |> head() # 6010행
+
+
+
+## 고도 `df_feat_correct_dem`, `df_feat_correct_dsm`
+df_feat_correct_dem <- chopin::extract_at(
+  x = chr_dem_file,
+  y = sf_monitors_correct,
+  radius = 1e-6,
+  force_df = TRUE
+) |>
+  dplyr::rename(dem = mean)
+
+df_feat_correct_dem |> head()   # 6010행
+
+df_feat_correct_dsm <- chopin::extract_at(
+  x = chr_dsm_file,
+  y = sf_monitors_correct,
+  radius = 1e-6,
+  force_df = TRUE
+) |>
+  dplyr::rename(dsm = mean) 
+
+df_feat_correct_dsm |> head()    # 6010행
+
+## mtpi, mtpi_1km
+df_feat_correct_mtpi <- chopin::extract_at(
+  x = terra::rast(chr_mtpi_file),
+  y = sf_monitors_correct,
+  radius = 1e-6,
+  force_df = TRUE
+) |> dplyr::rename(mtpi = mean) 
+
+df_feat_correct_mtpi_1km <- chopin::extract_at(
+  x = terra::rast(chr_mtpi_1km_file),
+  y = sf_monitors_correct,
+  radius = 1e-6,
+  force_df = TRUE
+) |> dplyr::rename(mtpi_1km = mean) 
+
+
+## emittors
+sf_emission_locs <- sf::st_read(chr_file_emission_locs, quiet = TRUE) |>
+  sf::st_transform(5179) |>
+  dplyr::filter(영업상태구분코드 == "01")
+
+sf_korea_watershed <- sf::st_read(chr_korea_watershed, quiet = TRUE) |>
+  sf::st_transform(5179)
+
+df_feat_correct_emittors <- gw_emittors(
+  input = sf_monitors_correct,
+  target = sf_emission_locs,
+  clip = sf_korea_watershed,
+  wfun = "gaussian",         # 가우시안 가중치 함수 사용
+  bw = 5000,                 # 대역폭(Bandwidth) 5km 설정
+  dist_method = "geodesic"   # 지대거리(測地線, 대권거리) 계산 방식
+) |>
+  sf::st_drop_geometry() |>
+  # gw_emission 열 이름을 n_emittors_watershed로 변경
+  dplyr::rename(n_emittors_watershed = gw_emission) |> 
+  dplyr::select(n_emittors_watershed)
+
+## landuse: 현재로서는 생략
 ```
 
 
+## merge
+
+```{r}
+# 1. 기초 데이터 및 도로 변수 조인
+# TMSID, TMSID2, year를 기준으로 측정소 정보와 도로 거리를 결합
+df_res <- sf_monitors_correct |>
+  dplyr::left_join(
+    df_feat_correct_d_road, 
+    by = c("TMSID", "TMSID2", "year")
+  )
+
+# 2. 기타 공간 피처(DEM, MTPI, Emittors) 결합
+# 각 추출 결과가 sf_monitors_correct와 동일한 행 순서를 가짐을 전제로 함
+df_res <- df_res |>
+  dplyr::mutate(
+    # dsm 변수가 정의되어 있지 않다면 제외하거나 dem으로 대체 가능
+    # dsm = as.numeric(unlist(df_feat_correct_dsm)), 
+    dem = as.numeric(unlist(df_feat_correct_dem)),
+    mtpi = as.numeric(unlist(df_feat_correct_mtpi)),
+    mtpi_1km = as.numeric(unlist(df_feat_correct_mtpi_1km)),
+    n_emittors_watershed = as.numeric(unlist(df_feat_correct_emittors$n_emittors_watershed))
+  )
+
+# 3. 단위 변환 및 결측치 처리
+df_feat_correct_merged <- df_res |>
+  dplyr::mutate(
+    # 도로 거리: m -> km 단위 변환
+    d_road = as.numeric(d_road) / 1000,
+    # 배출원 수: 결측치(NA)를 0으로 처리
+    n_emittors_watershed = ifelse(is.na(n_emittors_watershed), 0, n_emittors_watershed)
+  ) |>
+  # 모델링을 위해 공간 정보(geometry) 제거
+  sf::st_drop_geometry()
 
 
+# 최종 데이터 확인
+df_feat_correct_merged <- df_res
+```
 
+
+현재로서는 생략
 
 
 
@@ -341,9 +557,9 @@ for (dist in buffer_distances) {
   message(paste0("\n>>> Processing Buffer Distance: ", dist, "m <<<"))
   
   # 버퍼 생성 및 투영체 변환
-  temp_buffer <- sites_2020_sf %>%
-    st_transform(5186) %>%
-    st_buffer(dist = dist) %>%
+  temp_buffer <- sites_2020_sf |>
+    st_transform(5186) |>
+    st_buffer(dist = dist) |>
     st_transform(st_crs(era5_daily_sds[[1]]))
   
   # 고정 정보 추출 (TMSID, date_start, date_end 포함)

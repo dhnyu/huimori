@@ -393,7 +393,8 @@ list_process_feature <-
           dplyr::mutate(
             d_road = dist_road_nearest
           )
-        sf_monitors_dist_att
+        df_monitors_dist_att <- sf_monitors_dist_att |> sf::st_drop_geometry()
+        df_monitors_dist_att
       }
     ),
     targets::tar_target(
@@ -403,7 +404,8 @@ list_process_feature <-
         y = sf_monitors_correct,
         radius = 1e-6,
         force_df = TRUE
-      )
+      ) |>
+        dplyr::rename(dsm = mean)
     ),
     targets::tar_target(
       name = df_feat_correct_dem,
@@ -412,7 +414,8 @@ list_process_feature <-
         y = sf_monitors_correct,
         radius = 1e-6,
         force_df = TRUE
-      )
+      ) |>
+        dplyr::rename(dem = mean)
     ),
     targets::tar_target(
       name = df_feat_correct_landuse,
@@ -442,7 +445,7 @@ list_process_feature <-
           y = sf_monitors_correct,
           radius = 1e-6,
           force_df = TRUE
-        )
+        ) |> dplyr::rename(mtpi = mean) 
       }
     ),
     targets::tar_target(
@@ -454,7 +457,7 @@ list_process_feature <-
           y = sf_monitors_correct,
           radius = 1e-6,
           force_df = TRUE
-        )
+        ) |> dplyr::rename(mtpi_1km = mean) 
       }
     ),
     targets::tar_target(
@@ -528,50 +531,43 @@ list_process_feature <-
           input = sf_monitors_correct,
           target = sf_emission_locs,
           clip = sf_korea_watershed,
-          wfun = "gaussian",
-          bw = 5000,
-          dist_method = "geodesic"
-        )
+          wfun = "gaussian",         # 가우시안 가중치 함수 사용
+          bw = 5000,                 # 대역폭(Bandwidth) 5km 설정
+          dist_method = "geodesic"   # 지대거리(測地線, 대권거리) 계산 방식
+        ) |>
+          sf::st_drop_geometry() |>
+          # gw_emission 열 이름을 n_emittors_watershed로 변경
+          dplyr::rename(n_emittors_watershed = gw_emission) |> 
+          dplyr::select(n_emittors_watershed)
         result
       }
     ),
     targets::tar_target(
       name = df_feat_correct_merged,
       command = {
-        df_res <-
-          purrr::reduce(
-            .x =
-              list(
-                sf_monitors_correct,
-                df_feat_correct_d_road
-              ),
-            .f = collapse::join,
-            on = c("TMSID", "TMSID2", "year")
-          ) %>%
-          dplyr::bind_cols(
-            df_feat_correct_landuse
-          ) %>%
+        df_res <- sf_monitors_correct |>
+          dplyr::left_join(
+            df_feat_correct_d_road, 
+            by = c("TMSID", "TMSID2", "year")
+          )
+        
+        df_res <- df_res |>
           dplyr::mutate(
-            dsm = unlist(df_feat_correct_dsm),
-            dem = unlist(df_feat_correct_dem),
-            n_emittors_watershed = unlist(df_feat_correct_emittors$n_emittors_watershed),
-            mtpi = unlist(df_feat_correct_mtpi),
-            mtpi_1km = unlist(df_feat_correct_mtpi_1km)
-          ) %>%
+            # dsm 변수가 정의되어 있지 않다면 제외하거나 dem으로 대체 가능
+            # dsm = as.numeric(unlist(df_feat_correct_dsm)), 
+            dem = as.numeric(unlist(df_feat_correct_dem)),
+            mtpi = as.numeric(unlist(df_feat_correct_mtpi)),
+            mtpi_1km = as.numeric(unlist(df_feat_correct_mtpi_1km)),
+            n_emittors_watershed = as.numeric(unlist(df_feat_correct_emittors$n_emittors_watershed))
+          )
+
+        df_feat_correct_merged <- df_res |>
           dplyr::mutate(
             d_road = as.numeric(d_road) / 1000,
-            dsm = as.numeric(dsm),
-            dem = as.numeric(dem),
-            mtpi = as.numeric(mtpi),
-            n_emittors_watershed =
-              ifelse(
-                is.na(n_emittors_watershed), 0,
-                as.numeric(n_emittors_watershed)
-              )
-          ) %>%
-          sf::st_drop_geometry()
-        names(df_res) <- sub("mean.", "", names(df_res))
-        df_res
+            n_emittors_watershed = ifelse(is.na(n_emittors_watershed), 0, n_emittors_watershed)
+          ) |> sf::st_drop_geometry()
+        
+        df_feat_correct_merged
       }
     ),
     # Incorrect addresses
@@ -905,51 +901,26 @@ list_process_feature <-
         crew = targets::tar_resources_crew(controller = "controller_08")
       )
     ),
-    targets::tar_target(
-      name = df_feat_grid_merged,
-      command = {
-       df_res <-
-          purrr::reduce(
-            .x =
-              list(
-                list_pred_calc_grid,
-                df_feat_grid_d_road
-              ),
-            .f = collapse::join,
-            on = c("gid")
-          ) %>%
-          dplyr::bind_cols(
-            df_feat_grid_landuse
-          ) %>%
-          dplyr::mutate(
-            dsm = unlist(df_feat_grid_dsm),
-            dem = unlist(df_feat_grid_dem),
-            n_emittors_watershed = unlist(df_feat_grid_emittors$n_emittors_watershed),
-            mtpi = unlist(df_feat_grid_mtpi)
-          ) %>%
-          dplyr::mutate(
-            d_road = as.numeric(d_road) / 1000,
-            dsm = as.numeric(dsm),
-            dem = as.numeric(dem),
-            mtpi = as.numeric(mtpi),
-            n_emittors_watershed = as.numeric(n_emittors_watershed)
-          ) %>%
-          sf::st_drop_geometry()
-        names(df_res) <- sub("mean.", "", names(df_res))
-        df_res
-      },
-      iteration = "list",
-      pattern =
-      map(
-        list_pred_calc_grid,
-        df_feat_grid_d_road,
-        df_feat_grid_dsm,
-        df_feat_grid_dem,
-        df_feat_grid_landuse,
-        df_feat_grid_mtpi,
-        df_feat_grid_emittors
-      )
-  )
+   targets::tar_target(
+     name = df_feat_grid_merged,
+     command = {
+       df_res <- df_feat_grid_d_road %>%
+         dplyr::bind_cols(df_feat_grid_landuse)
+       df_res %>%
+         dplyr::mutate(
+           dsm = as.numeric(df_feat_grid_dsm), 
+           dem = as.numeric(df_feat_grid_dem),
+           mtpi = as.numeric(df_feat_grid_mtpi),
+           n_emittors_watershed = as.numeric(df_feat_grid_emittors$n_emittors_watershed),
+           d_road = as.numeric(d_road) / 1000
+         )
+     },
+     iteration = "list",
+     pattern = map(
+       df_feat_grid_d_road,
+       df_feat_grid_landuse
+     )
+   )
 )
 
 
@@ -963,26 +934,8 @@ list_process_feature <-
 #### int_size_split, sf_grid_correct_split, int_split_grid_ids, list_pred_calc_grid_old
 #### df_feat_incorrect_emittors, df_feat_grid_mtpi_1km
 
-### 오류발생
-# + sf_grid_size declared [1 branches]
-# + form_fit declared [2 branches]
-# + chr_landuse_freq_file declared [14 branches]
-# + list_pred_calc_grid declared [593 branches]
-# + list_pred_calc_grid_old declared [1645 branches]
-# + df_feat_grid_d_road declared [593 branches]
-# + df_feat_grid_dem declared [593 branches]
-# + df_feat_grid_mtpi_1km declared [593 branches]
-# + df_feat_grid_mtpi declared [593 branches]
-# + df_feat_grid_dsm declared [593 branches]
-# + df_feat_grid_emittors declared [593 branches]
-# + df_feat_grid_landuse declared [8302 branches]
-# Error:2 targets ■■■■■■■                          [994ms, 0+, 2628-]
-# ! Error in tar_visnetwork():
-#   unequal lengths of vars in map(list_pred_calc_grid, df_feat_grid_d_road, df_feat_grid_dsm,
-#                                  df_feat_grid_dem, df_feat_grid_landuse, df_feat_grid_mtpi,
-#                                  df_feat_grid_emittors)
-
-### 파이프라인에서 landuse는 모두 제거함.
+### df_feat_grid_d_road 수정: 연도별 값 반영하여 시공간변수화
+### df_feat_grid_merged 수정: 일반 공간변수(593)와 시공간변수(8302, road/landuse)를 같은 길이로 매핑하도록 수정.
 
 
 

@@ -320,6 +320,31 @@ df_feat_correct_emittors <- gw_emittors(
 ## merge
 
 ```{r}
+# 미세먼지 데이터 정제 (음수값 삭제)
+dt_measurements <- dt_measurements %>%
+  dplyr::mutate(
+    PM10 = ifelse(PM10 < 0, NA, PM10),
+    PM25 = ifelse(PM25 < 0, NA, PM25)
+  )
+
+# 시간별 데이터를 일별 해상도로 upscale
+dt_daily_summary <- dt_measurements %>%
+  dplyr::group_by(TMSID, TMSID2, date) %>%
+  dplyr::summarise(
+    PM10_daily = mean(PM10, na.rm = TRUE),
+    PM25_daily = mean(PM25, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    year = lubridate::year(date),
+    month = lubridate::month(date),
+    day = lubridate::day(date),
+    TMSID = as.character(TMSID),
+    TMSID2 = as.character(TMSID2)
+  )
+
+
+# Merging
 # 1. 기초 데이터 및 도로 변수 조인
 # TMSID, TMSID2, year를 기준으로 측정소 정보와 도로 거리를 결합
 df_res <- sf_monitors_correct |>
@@ -354,35 +379,8 @@ df_feat_correct_merged <- df_res |>
 
 # 최종 데이터 확인
 df_feat_correct_merged <- df_res
-```
-
-## 일간 해상도로 업데이트
 
 
-
-```{r}
-# 미세먼지 데이터 정제 (음수값 삭제)
-dt_measurements <- dt_measurements %>%
-  dplyr::mutate(
-    PM10 = ifelse(PM10 < 0, NA, PM10),
-    PM25 = ifelse(PM25 < 0, NA, PM25)
-  )
-
-# 시간별 데이터를 일별 해상도로 upscale
-dt_daily_summary <- dt_measurements %>%
-  dplyr::group_by(TMSID, TMSID2, date) %>%
-  dplyr::summarise(
-    PM10_daily = mean(PM10, na.rm = TRUE),
-    PM25_daily = mean(PM25, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  dplyr::mutate(
-    year = lubridate::year(date),
-    month = lubridate::month(date),
-    day = lubridate::day(date),
-    TMSID = as.character(TMSID),
-    TMSID2 = as.character(TMSID2)
-  )
 
 # 1. 일간 확장 수행: 기존 연간 해상도를 일간 해상도로 확장하기 위한 밑작업.
 df_feat_correct_merged_daily <- df_feat_correct_merged %>%
@@ -590,18 +588,15 @@ gc()
 lapply(ras_era5, function(x) {
   terra::summary(x[[1:5]])
 })
-```
 
-
-```{r}
 # 기존 merged 데이터에 공간정보 주입
-
 sf_monitors_correct_ref <- sf_monitors_correct %>%
   dplyr::distinct(TMSID, TMSID2, .keep_all = TRUE) %>%
   dplyr::select(TMSID, TMSID2, geometry)
 
 # 2. 일간 데이터셋에 공간 정보 조인
 sf_feat_correct_merged_daily <- df_feat_correct_merged_daily %>%
+  dplyr::select(-geometry) %>% 
   dplyr::left_join(sf_monitors_correct_ref, by = c("TMSID", "TMSID2")) %>%
   sf::st_as_sf()
 
@@ -698,73 +693,109 @@ print(tail(df_feat_correct_era5_30m_daily))
 ### XGBoost
 
 ```{r}
-# 1. 병렬 처리 설정 (mirai_multisession 적용)
-# 200만 행의 데이터 크기를 고려하여
-future::plan(future.mirai::mirai_multisession, workers = 20L)
-
-# 2. 데이터 준비 및 피처 엔지니어링 (data.table 활용)
+# 1. 데이터 필터링 및 피처 엔지니어링
 setDT(df_feat_correct_era5_30m_daily)
+
+# 보존할 모든 컬럼 정의 (학습용 피처 + 식별용 ID 포함)
+vec_keep_cols <- c(
+  "TMSID", "TMSID2", "year", "month", "day", "geometry", 
+  "site_type", "dem", "mtpi", "mtpi_1km", "d_road",       
+  "temp_2m", "solar_rad", "u_wind", "v_wind", "pressure", "precip", 
+  "PM10_smooth"
+)
+
 df_model_ready <- df_feat_correct_era5_30m_daily[
-  !is.na(PM10_smooth) & year >= 2018
+  !is.na(PM10_smooth) & year >= 2018, 
+  ..vec_keep_cols
 ][, `:=`(
   ws_abs = sqrt(u_wind^2 + v_wind^2),
   doy = yday(as.Date(paste(year, month, day, sep="-"))),
   is_weekend = factor(fifelse(wday(as.Date(paste(year, month, day, sep="-"))) %in% c(1, 7), "Yes", "No")),
-  site_type = factor(site_type)
+  site_type = factor(site_type),
+  d_road = as.numeric(d_road)
 )]
 
-# 공간 분석을 위해 sf 객체로 유지
+# 2. 공간 객체 변환 및 시계열 분할 (데이터 보존)
+# TMSID, TMSID2, day가 삭제되지 않고 sf_model_ready에 그대로 유지됨
 sf_model_ready <- st_as_sf(df_model_ready)
+
+# 2018~2022: 학습 및 튜닝용 / 2023: 최종 검증용
 df_train_full <- sf_model_ready %>% filter(year <= 2022)
 df_test_2023  <- sf_model_ready %>% filter(year == 2023)
 
-# 3. 공간적 블록 교차 검증 (Spatial Block CV)
+# 3. 공간적 블록 교차 검증 (Spatial Block CV) 생성
 set.seed(123)
 spatial_folds <- spatial_block_cv(df_train_full, v = 5)
 
-# 4. 모델 레시피 및 사양 정의
+# 4. 결과 컬럼 확인
+# 모든 식별자(TMSID 등)와 생성된 피처(doy, ws_abs 등)가 존재해야 함
+print(colnames(df_train_full))
+
+# --------------------------------------------------------------------
+# 1. 고성능 병렬 처리 설정
+future::plan(future.mirai::mirai_multisession, workers = 24L, gc=TRUE)
+
+# 2. 모델 레시피 정의 (식별자 역할 부여)
 xgb_recipe <- recipe(PM10_smooth ~ ., data = df_train_full) %>%
-  update_role(TMSID, TMSID2, year, month, day, geometry, starts_with("date"), new_role = "ID") %>%
+  # TMSID, TMSID2, day, geometry를 학습에서 제외하고 보존
+  update_role(TMSID, TMSID2, day, geometry, new_role = "ID") %>%
+  # 명시적으로 연도와 월은 학습에 참여시키고 싶다면 위 ID 리스트에서 제외하십시오.
+  # 현재 설정은 year, month를 Predictor로 사용합니다.
   step_dummy(all_nominal_predictors()) %>%
   step_zv(all_predictors())
 
+# 3. 모델 사양 및 하이퍼파라미터 범위 설정
 xgb_spec <- boost_tree(
   trees = tune(), tree_depth = tune(), learn_rate = tune(), 
   mtry = tune(), min_n = tune()
 ) %>% 
-  set_engine("xgboost", nthread = 1) %>% # 전체 병렬 처리를 future가 관리하므로 내부 nthread는 1로 설정
+  set_engine("xgboost", 
+             nthread = 1, 
+             tree_method = "hist") %>% # 고속 연산 모드
   set_mode("regression")
 
-xgb_workflow <- workflow() %>% add_model(xgb_spec) %>% add_recipe(xgb_recipe)
+xgb_workflow <- workflow() %>% 
+  add_model(xgb_spec) %>% 
+  add_recipe(xgb_recipe)
 
-# 5. 하이퍼파라미터 튜닝 (Race ANOVA)
+# 4. 하이퍼파라미터 튜닝 (Race ANOVA)
 model_metrics <- metric_set(rmse, mae)
 
-# Race ANOVA를 통한 고속 튜닝 수행
+# mtry의 범위를 데이터셋 변수 개수에 맞게 자동 확정
+set.seed(123)
 tune_res <- tune_race_anova(
   xgb_workflow,
   resamples = spatial_folds,
-  grid = 20, # Latin Hypercube 기반 자동 그리드 생성
+  grid = 20, 
   metrics = model_metrics,
   control = control_race(
-    parallel_over = "everything", # future 프레임워크 활용 설정
-    save_pred = TRUE,
+    parallel_over = "everything", 
+    save_pred = FALSE, # 메모리 절약
     verbose_elim = TRUE
   )
 )
 
-# 병렬 세션 종료
+# 병렬 세션 종료 (메모리 회수)
 future::plan(sequential)
 
-# 6. 최종 모델 확정 및 2023년 외부 검증
+# 5. 최종 모델 확정 및 2023년 외부 검증
+# RMSE 기준 최적 파라미터 선택
 best_params <- select_best(tune_res, metric = "rmse")
-final_fit <- finalize_workflow(xgb_workflow, best_params) %>% fit(data = df_train_full)
 
+# 전체 학습 데이터(2018-2022)로 최종 학습
+final_fit <- finalize_workflow(xgb_workflow, best_params) %>% 
+  fit(data = df_train_full)
+
+# 6. 2023년 예측 및 성능 평가
 results_2023 <- predict(final_fit, df_test_2023) %>%
   bind_cols(df_test_2023) %>%
   st_drop_geometry()
 
-final_performance <- results_2023 %>% model_metrics(truth = PM10_smooth, estimate = .pred)
+# 최종 지표 출력
+final_performance <- results_2023 %>% 
+  model_metrics(truth = PM10_smooth, estimate = .pred)
+
+print("--- 2023 Final Test Performance ---")
 print(final_performance)
 ```
 

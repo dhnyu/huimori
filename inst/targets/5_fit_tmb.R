@@ -100,25 +100,3 @@ list_tune_models <-
       pattern = map(workflow_tune_incorrect_spatial)
     )
   )
-
-tar_make()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -92,11 +92,8 @@ list_process_site <-
       name = sf_monitors_correct,
       command = {
 
-        dt_measurements_clean <- data.table::copy(dt_measurements)
-        dt_measurements_clean[, date := as.Date(date)]
-        
         ak_sites_annual <- huimori::summarize_annual(
-          data = dt_measurements_clean,
+          data = dt_measurements,
           timeflag = "date"
         )
 
@@ -132,9 +129,6 @@ list_process_site <-
         ##   weight by lengths of each location for annual mean
         sites_sf <-
           sites_fullrange |>
-          dplyr::mutate(
-            dplyr::across(dplyr::contains("date"), as.Date)
-          ) |>
           dplyr::filter(!is.na(lon)) |>
           st_as_sf(
             coords = c("lon", "lat"),
@@ -166,14 +160,9 @@ list_process_site <-
             TMSID, year, date_start, date_end, site_type,
             longitude, latitude, longitude_common, latitude_common
           )
-        
-        dt_measurements_clean <- data.table::copy(dt_measurements)
-        if ("date" %in% names(dt_measurements_clean)) {
-          dt_measurements_clean[, date := as.Date(date)]
-        }
-        
+
         ak_sites_annual <- huimori::summarize_annual(
-          data = dt_measurements_clean, # 안정적인 데이터 사용
+          data = dt_measurements,
           timeflag = "date"
         )
 
@@ -220,9 +209,6 @@ list_process_site <-
         # as-is
         sites_asis_sf <-
           sites_asis |>
-          dplyr::mutate(
-            dplyr::across(dplyr::contains("date"), as.Date)
-          ) |>
           dplyr::filter(!is.na(lono) & !is.na(lato)) |>
           st_as_sf(
             coords = c("lono", "lato"),
@@ -266,7 +252,7 @@ list_process_site <-
             )
           terra::writeRaster(
             x = ras_res,
-            filename = file.path(chr_dir_out, "landuse_freq_glc_fcs30d_2022.tif"),
+            filename = file.path(chr_dir_data, "landuse_freq_glc_fcs30d_2022.tif"),
             overwrite = TRUE
           )
           TRUE
@@ -352,6 +338,28 @@ list_process_split <-
       name = int_split_grid_ids,
       command = seq_len(nrow(sf_grid_correct_split)),
       iteration = "list"
+    ),
+    targets::tar_target(
+      list_pred_calc_grid_old,
+      command = {
+        grid_unit <- sf::st_bbox(sf_grid_correct_split[int_split_grid_ids, ])
+        sf::st_as_sf(
+          sf_grid_size |>
+            dplyr::filter(
+              (X <= grid_unit[3] & X >= grid_unit[1]) &
+              (Y <= grid_unit[4] & Y >= grid_unit[2])
+            ),
+          coords = c("X", "Y"),
+          crs = 5179,
+          remove = FALSE
+        )
+      },
+      iteration = "list",
+      pattern = map(int_split_grid_ids),
+      description = "Split prediction grid into list by chopin grid",
+      resources = targets::tar_resources(
+        crew = targets::tar_resources_crew(controller = "controller_15")
+      )
     )
   )
 
@@ -409,30 +417,8 @@ list_process_feature <-
     targets::tar_target(
       name = df_feat_correct_landuse,
       command = {
-        # landuse_ras <-
-        #   terra::rast(
-        #     chr_landuse_files,
-        #     win = c(124, 132.5, 33, 38.6)
-        #   )
-        # flt7 <-
-        #   matrix(
-        #     c(0, 0, 1, 1, 1, 0, 0,
-        #       0, 1, 1, 1, 1, 1, 0,
-        #       1, 1, 1, 1, 1, 1, 1,
-        #       1, 1, 1, 1, 1, 1, 1,
-        #       1, 1, 1, 1, 1, 1, 1,
-        #       0, 1, 1, 1, 1, 1, 0,
-        #       0, 0, 1, 1, 1, 0, 0),
-        #     nrow = 7, ncol = 7, byrow = TRUE
-        #   )
         landuse_ras <-
           terra::rast(chr_landuse_freq_file)
-
-        # landuse_freq <-
-        #   huimori::rasterize_freq(
-        #     ras = landuse_ras,
-        #     mat = flt7
-        #   )
         chopin::extract_at(
           x = landuse_ras,
           y = sf_monitors_correct,
@@ -732,39 +718,42 @@ list_process_feature <-
       }
     ),
     # Grid point features
-    targets::tar_target(
-      name = df_feat_grid_d_road,
-      command = {
-        road <- sf::st_read(chr_road_files[length(chr_road_files)], quiet = TRUE)
-        road <- sf::st_transform(road, sf::st_crs(list_pred_calc_grid))
-        road <- road %>%
-          dplyr::filter(!ROAD_TYPE %in% c("002", "004") & ROAD_USE == 0)
-        nearest_idx <- sf::st_nearest_feature(
-          x = list_pred_calc_grid,
-          y = road
-        )
-        road_nearest <- road[nearest_idx, ]
-        dist_road_nearest <-
-          sf::st_distance(
-            x = list_pred_calc_grid,
-            y = road_nearest,
-            by_element = TRUE
-          )
-        sf_grid_dist_att <-
-          list_pred_calc_grid |>
-          dplyr::mutate(
-            d_road = dist_road_nearest
-          ) |>
-          sf::st_drop_geometry()
-        sf_grid_dist_att
-
-      },
-      iteration = "list",
-      pattern = map(list_pred_calc_grid),
-      resources = targets::tar_resources(
-        crew = targets::tar_resources_crew(controller = "controller_20")
-      )
-    ),
+   targets::tar_target(
+     name = df_feat_grid_d_road,
+     command = {
+       road <- sf::st_read(chr_road_files, quiet = TRUE)
+       road <- sf::st_transform(road, sf::st_crs(list_pred_calc_grid))
+       road <- road %>%
+         dplyr::filter(!ROAD_TYPE %in% c("002", "004") & ROAD_USE == 0)
+       nearest_idx <- sf::st_nearest_feature(
+         x = list_pred_calc_grid,
+         y = road
+       )
+       road_nearest <- road[nearest_idx, ]
+       dist_road_nearest <-
+         sf::st_distance(
+           x = list_pred_calc_grid,
+           y = road_nearest,
+           by_element = TRUE
+         )
+       
+       sf_grid_dist_att <-
+         list_pred_calc_grid |>
+         dplyr::mutate(
+           d_road = dist_road_nearest
+         ) |>
+         sf::st_drop_geometry()
+       
+       sf_grid_dist_att
+     },
+     iteration = "list",
+     
+     # Cross mapping
+     pattern = cross(list_pred_calc_grid, chr_road_files),
+     resources = targets::tar_resources(
+       crew = targets::tar_resources_crew(controller = "controller_20")
+     )
+   ),
     targets::tar_target(
       name = df_feat_grid_dsm,
       command = {
@@ -797,55 +786,71 @@ list_process_feature <-
         crew = targets::tar_resources_crew(controller = "controller_20")
       )
     ),
-   targets::tar_target(
-     name = df_feat_grid_landuse,
-     command = {
-       init_list <- list()
-       
-       # [수정] chr_landuse_freq_file이 리스트일 경우를 대비해 벡터로 변환 후 마지막 파일 선택
-       # unlist를 통해 순수 문자열 경로 확보
-       target_files <- unlist(chr_landuse_freq_file)
-       target_raster_file <- tail(target_files, 1)
-       
-       # 파일 존재 여부 체크 (디버깅용)
-       if (length(target_raster_file) == 0 || !file.exists(target_raster_file)) {
-         stop(paste("유효한 토지이용 파일을 찾을 수 없습니다:", target_raster_file))
-       }
-       
-       list_10k_split <- seq_len(nrow(list_pred_calc_grid))
-       list_10k_split <- ceiling(list_10k_split / 5e4)
-       
-       for (i in seq_len(max(list_10k_split))) {
-         list_pred_calc_grid_i <- list_pred_calc_grid[list_10k_split == i, ]
-         if (nrow(list_pred_calc_grid_i) == 0) next
-         
-         ext_reproj <- terra::project(
-           terra::ext(list_pred_calc_grid_i) + 1000, 
-           "EPSG:5179", "EPSG:4326"
-         )
-         
-         # [수정] SpatRaster를 생성할 때 명시적으로 단일 파일 경로 전달
-         landuse_ras_raw <- terra::rast(target_raster_file)
-         landuse_ras <- terra::crop(landuse_ras_raw, ext_reproj)
-         
-         extracted_i <- chopin::extract_at(
-           x = landuse_ras,
-           y = list_pred_calc_grid_i,
-           radius = 100,
-           func = "frac",
-           force_df = TRUE
-         )
-         init_list[[i]] <- extracted_i
-       }
-       
-       collapse::rowbind(init_list, fill = TRUE)
-     },
-     iteration = "list",
-     pattern = map(list_pred_calc_grid), 
-     resources = targets::tar_resources(
-       crew = targets::tar_resources_crew(controller = "controller_20")
-     )
-   ),
+    targets::tar_target(
+      name = df_feat_grid_landuse,
+      command = {
+        init_list <- list()
+        # another implementation: memory-minded
+        list_10k_split <-
+          list_pred_calc_grid |>
+          nrow() |>
+          seq_len()
+        list_10k_split <-
+          ceiling(list_10k_split / 5e4)
+        for (i in seq_len(max(list_10k_split))) {
+          list_pred_calc_grid_i <-
+            list_pred_calc_grid[list_10k_split == i, ]
+          if (nrow(list_pred_calc_grid_i) == 0) {
+            next
+          }
+
+          crs_ras <- "EPSG:4326"
+          crs_vec <- "EPSG:5179"
+          ext_reproj <-
+            terra::project(
+              terra::ext(list_pred_calc_grid_i) + 1000,
+              crs_vec, crs_ras
+            )
+
+          landuse_ras <-
+            terra::rast(
+              chr_landuse_freq_file,
+              win = ext_reproj
+            )
+          extracted_i <-
+            chopin::extract_at(
+              x = landuse_ras,
+              y = list_pred_calc_grid_i,
+              radius = 100,
+              func = "frac",
+              force_df = TRUE
+            )
+          init_list[[i]] <- extracted_i
+          rm(extracted_i)
+        }
+
+        collapse::rowbind(init_list, fill = TRUE)
+
+        # old implementation
+        # landuse_ras <-
+        #   terra::rast(chr_landuse_files[length(chr_landuse_files)], win = c(124, 132.5, 33, 38.6))
+
+        # # landuse_freq <-
+        # #   terra::rast(file.path(chr_dir_data, "landuse_freq_glc_fcs30d_2022.tif"))
+        # chopin::extract_at(
+        #   x = landuse_ras,
+        #   y = list_pred_calc_grid,
+        #   radius = 100,
+        #   func = "frac",
+        #   force_df = TRUE
+        # )
+      },
+      iteration = "list",
+      pattern = cross(list_pred_calc_grid, chr_landuse_freq_file),
+      resources = targets::tar_resources(
+        crew = targets::tar_resources_crew(controller = "controller_20")
+      )
+    ),
     targets::tar_target(
       name = df_feat_grid_mtpi,
       command = {
@@ -863,68 +868,43 @@ list_process_feature <-
         crew = targets::tar_resources_crew(controller = "controller_20")
       )
     ),
-   targets::tar_target(
-     name = df_feat_grid_mtpi_1km,
-     command = {
-       mtpi_ras <- terra::rast(chr_mtpi_1km_file)
-
-       chopin::extract_at(
-         x = mtpi_ras,
-         y = list_pred_calc_grid,
-         radius = 1e-6,
-         force_df = TRUE
-       )
-     },
-     iteration = "list",
-     pattern = map(list_pred_calc_grid),
-     resources = targets::tar_resources(
-       crew = targets::tar_resources_crew(controller = "controller_20")
-     )
-   ),
-   targets::tar_target(
-     name = df_feat_grid_emittors,
-     command = {
-       # 1. 입력 데이터 정제: 빈 기하(Empty Geometry) 및 NA 제거
-       input_clean <- list_pred_calc_grid |> 
-         dplyr::filter(!sf::st_is_empty(geometry))
-       
-       target_clean <- sf_emission_locs |> 
-         dplyr::filter(!sf::st_is_empty(geometry))
-       
-       # 2. 예외 처리: 만약 입력 격자나 배출원 데이터가 없으면 0으로 구성된 데이터프레임 반환
-       if (nrow(input_clean) == 0 || nrow(target_clean) == 0) {
-         return(data.frame(n_emittors_watershed = rep(0, nrow(list_pred_calc_grid))))
-       }
-       
-       # 3. 함수 실행
-       result <- gw_emittors(
-         input = input_clean,
-         target = target_clean,
-         clip = sf_korea_watershed,
-         wfun = "gaussian",
-         bw = 5000,
-         dist_method = "geodesic"
-       )
-       
-       # 4. 결과 검증: NA가 발생한 경우 0으로 치환하여 논리 오류 방지
-       if (is.null(result) || nrow(result) == 0) {
-         result <- data.frame(n_emittors_watershed = rep(0, nrow(list_pred_calc_grid)))
-       } else {
-         result$n_emittors_watershed <- ifelse(
-           is.na(result$n_emittors_watershed), 
-           0, 
-           result$n_emittors_watershed
-         )
-       }
-       
-       result
-     },
-     iteration = "list",
-     pattern = map(list_pred_calc_grid),
-     resources = targets::tar_resources(
-       crew = targets::tar_resources_crew(controller = "controller_08")
-     )
-   ),
+    targets::tar_target(
+      name = df_feat_grid_mtpi_1km,
+      command = {
+        mtpi_ras <- terra::rast(chr_mtpi_1km_file)
+        chopin::extract_at(
+          x = mtpi_ras,
+          y = list_pred_calc_grid,
+          radius = 1e-6,
+          force_df = TRUE
+        )
+      },
+      iteration = "list",
+      pattern = map(list_pred_calc_grid),
+      resources = targets::tar_resources(
+        crew = targets::tar_resources_crew(controller = "controller_20")
+      )
+    ),
+    targets::tar_target(
+      name = df_feat_grid_emittors,
+      command = {
+        result <-
+          gw_emittors(
+            input = list_pred_calc_grid,
+            target = sf_emission_locs,
+            clip = sf_korea_watershed,
+            wfun = "gaussian",
+            bw = 5000,
+            dist_method = "geodesic"
+          )
+        result
+      },
+      iteration = "list",
+      pattern = map(list_pred_calc_grid),
+      resources = targets::tar_resources(
+        crew = targets::tar_resources_crew(controller = "controller_08")
+      )
+    ),
     targets::tar_target(
       name = df_feat_grid_merged,
       command = {
@@ -959,10 +939,57 @@ list_process_feature <-
         df_res
       },
       iteration = "list",
-      pattern = map(
-        list_pred_calc_grid, df_feat_grid_d_road, df_feat_grid_dsm, 
-        df_feat_grid_dem, df_feat_grid_landuse, df_feat_grid_mtpi, 
-        df_feat_grid_mtpi_1km, df_feat_grid_emittors
+      pattern =
+      map(
+        list_pred_calc_grid,
+        df_feat_grid_d_road,
+        df_feat_grid_dsm,
+        df_feat_grid_dem,
+        df_feat_grid_landuse,
+        df_feat_grid_mtpi,
+        df_feat_grid_emittors
       )
   )
 )
+
+
+
+# ----------------------------------------------------------------
+# 변경 log 기록(dhnyu)
+## 2026.01.31
+
+### DAG 상에서 최종 객체와 직접적으로 이어지지 않는 target 체크
+#### dt_asos, ras_landuse_freq
+#### int_size_split, sf_grid_correct_split, int_split_grid_ids, list_pred_calc_grid_old
+#### df_feat_incorrect_emittors, df_feat_grid_mtpi_1km
+
+### 오류발생
+# + sf_grid_size declared [1 branches]
+# + form_fit declared [2 branches]
+# + chr_landuse_freq_file declared [14 branches]
+# + list_pred_calc_grid declared [593 branches]
+# + list_pred_calc_grid_old declared [1645 branches]
+# + df_feat_grid_d_road declared [593 branches]
+# + df_feat_grid_dem declared [593 branches]
+# + df_feat_grid_mtpi_1km declared [593 branches]
+# + df_feat_grid_mtpi declared [593 branches]
+# + df_feat_grid_dsm declared [593 branches]
+# + df_feat_grid_emittors declared [593 branches]
+# + df_feat_grid_landuse declared [8302 branches]
+# Error:2 targets ■■■■■■■                          [994ms, 0+, 2628-]
+# ! Error in tar_visnetwork():
+#   unequal lengths of vars in map(list_pred_calc_grid, df_feat_grid_d_road, df_feat_grid_dsm,
+#                                  df_feat_grid_dem, df_feat_grid_landuse, df_feat_grid_mtpi,
+#                                  df_feat_grid_emittors)
+
+### 파이프라인에서 landuse는 모두 제거함.
+
+
+
+
+
+
+
+
+
+

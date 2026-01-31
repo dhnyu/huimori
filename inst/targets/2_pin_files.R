@@ -77,12 +77,7 @@ list_basefiles <-
       command = {
         mtpi <- terra::rast(chr_mtpi_file)
         mtpi_1km <- terra::aggregate(mtpi, fact = 11, fun = mean, na.rm = TRUE)
-        
-        # [수정] chr_dir_data 대신 chr_dir_out을 참조하여 저장
-        out_dir <- file.path(chr_dir_out, "elevation")
-        if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
-        
-        out_file <- file.path(out_dir, "kngii_1km_mtpi.tif")
+        out_file <- file.path(chr_dir_data, "elevation", "kngii_1km_mtpi.tif")
         terra::writeRaster(mtpi_1km, out_file, overwrite = TRUE)
         out_file
       },
@@ -120,3 +115,17 @@ list_basefiles <-
       }
     )
   )
+
+
+# ----------------------------------------------------------------
+# 변경 log 기록(dhnyu)
+## 2026.01.31
+
+### DAG 상에서 최종 객체와 직접적으로 이어지지 않는 target 체크
+#### chr_asos_file, chr_asos_site_file, chr_landuse_files
+
+
+
+
+
+

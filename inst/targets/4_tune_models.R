@@ -38,15 +38,6 @@ list_fit_models <-
       pattern = map(chr_outcome),
       iteration = "list"
     )
-    ,
-    targets::tar_target(
-      name = list_fit_tmb,
-      command = {
-        huimori::fit_tmb(
-
-        )
-      }
-    )
   )
 
 
@@ -232,7 +223,7 @@ list_pred_process <-
     ),
     targets::tar_target(
       name = chr_file_grid_250m,
-      command = file.path(chr_dir_data, "grid_250m.gpkg")
+      command = file.path(chr_dir_out, "grid_250m.gpkg")
     ),
     targets::tar_target(
       name = df_grid_250m,

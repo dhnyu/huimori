@@ -77,7 +77,12 @@ list_basefiles <-
       command = {
         mtpi <- terra::rast(chr_mtpi_file)
         mtpi_1km <- terra::aggregate(mtpi, fact = 11, fun = mean, na.rm = TRUE)
-        out_file <- file.path(chr_dir_data, "elevation", "kngii_1km_mtpi.tif")
+        
+        # [수정] chr_dir_data 대신 chr_dir_out을 참조하여 저장
+        out_dir <- file.path(chr_dir_out, "elevation")
+        if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+        
+        out_file <- file.path(out_dir, "kngii_1km_mtpi.tif")
         terra::writeRaster(mtpi_1km, out_file, overwrite = TRUE)
         out_file
       },

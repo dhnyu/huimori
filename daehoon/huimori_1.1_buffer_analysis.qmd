@@ -32,6 +32,9 @@ library(stringi)
 library(plyr)
 library(chopin)
 library(geosphere)
+library(tidymodels)
+library(spatialsample)
+library(finetune)
 ```
 
 # 경로 정리
@@ -94,11 +97,6 @@ geodata::geodata_path(file.path("~", "geodatacache"))
 sf_korea_all <- geodata::gadm(country = "KOR", level = 0) |>
   sf::st_as_sf() |>
   sf::st_transform("EPSG:5179")
-
-# 기후기상
-chr_dir_climate <- "/mnt/hdd001/huimori"
-chr_ERA5_Land_file <- list.files(file.path(chr_dir_climate, "ERA5_Land"), pattern = "\\.nc$", full.names = TRUE)
-chr_CHELSA_files <- list.files(file.path(chr_dir_climate, "Chelsa"), pattern = "\\.nc$", full.names = TRUE)
 ```
 
 
@@ -358,20 +356,113 @@ df_feat_correct_merged <- df_res |>
 df_feat_correct_merged <- df_res
 ```
 
-
-현재로서는 생략
-
+## 일간 해상도로 업데이트
 
 
 
+```{r}
+# 미세먼지 데이터 정제 (음수값 삭제)
+dt_measurements <- dt_measurements %>%
+  dplyr::mutate(
+    PM10 = ifelse(PM10 < 0, NA, PM10),
+    PM25 = ifelse(PM25 < 0, NA, PM25)
+  )
 
+# 시간별 데이터를 일별 해상도로 upscale
+dt_daily_summary <- dt_measurements %>%
+  dplyr::group_by(TMSID, TMSID2, date) %>%
+  dplyr::summarise(
+    PM10_daily = mean(PM10, na.rm = TRUE),
+    PM25_daily = mean(PM25, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    year = lubridate::year(date),
+    month = lubridate::month(date),
+    day = lubridate::day(date),
+    TMSID = as.character(TMSID),
+    TMSID2 = as.character(TMSID2)
+  )
 
+# 1. 일간 확장 수행: 기존 연간 해상도를 일간 해상도로 확장하기 위한 밑작업.
+df_feat_correct_merged_daily <- df_feat_correct_merged %>%
+  dplyr::mutate(
+    # 나중에 복구하기 위해 원본 기간 보존
+    orig_date_start = date_start,
+    orig_date_end = date_end,
+    # 확장을 위한 임시 날짜 생성
+    tmp_start = as.Date(pmax(date_start, as.POSIXct(sprintf("%d-01-01", year), tz = "Asia/Seoul"))),
+    tmp_end   = as.Date(pmin(date_end, as.POSIXct(sprintf("%d-12-31", year), tz = "Asia/Seoul"))),
+    diff_days = as.numeric(tmp_end - tmp_start) + 1
+  ) %>%
+  # 행 복제
+  tidyr::uncount(diff_days) %>%
+  # 날짜 및 시간 변수 생성
+  dplyr::group_by(TMSID, TMSID2, year, orig_date_start) %>%
+  dplyr::mutate(
+    curr_date = tmp_start + (dplyr::row_number() - 1),
+    month = lubridate::month(curr_date),
+    day   = lubridate::day(curr_date)
+  ) %>%
+  dplyr::ungroup() %>%
+  # 2. 원본 기간 복구 및 불필요 변수 제거
+  dplyr::mutate(
+    date_start = orig_date_start,
+    date_end   = orig_date_end
+  ) %>%
+  dplyr::select(-orig_date_start, -orig_date_end, -tmp_start, -tmp_end, -curr_date, -PM10, -PM25) %>%
+  dplyr::left_join(
+    dt_daily_summary %>% dplyr::select(-date), 
+    by = c("TMSID", "TMSID2", "year", "month", "day")
+  ) %>%
+  dplyr::rename(PM10 = PM10_daily, PM25 = PM25_daily) %>%
+  # NaN 방지
+  dplyr::mutate(
+    PM10 = ifelse(is.nan(PM10), NA, PM10),
+    PM25 = ifelse(is.nan(PM25), NA, PM25)
+  ) %>%
+  # 정렬 및 구조 유지
+  dplyr::relocate(year, month, day, PM10, PM25, .after = site_type) %>%
+  dplyr::arrange(TMSID, year, month, day)
 
+# 아웃라이어 제거 및 3일 rolling mean 적용
+# 1. 데이터 정렬 및 데이터테이블 설정
+setDT(df_feat_correct_merged_daily)
+setkey(df_feat_correct_merged_daily, TMSID2, year, month, day)
 
+# 2. 분석 대상 오염물질 정의
+target_pollutants <- c("PM10", "PM25")
 
+for (p in target_pollutants) {
+  
+  # 가. 지점별 극단적 아웃라이어 통제 (Capping)
+  # 황사 등 극단적 수치를 고려하여 Q3 + 3*IQR 정도로 보수적 절단 제안
+  df_feat_correct_merged_daily[, (p) := {
+    val = get(p)
+    upper_limit = quantile(val, 0.75, na.rm = TRUE) + 3 * IQR(val, na.rm = TRUE)
+    fifelse(val > upper_limit, upper_limit, val)
+  }, by = TMSID2]
+  
+  # 나. 결측치 전후 보완 (Forward Fill -> Backward Fill)
+  # 이동 평균 계산 전 NA를 제거하여 윈도우 계산 단절 방지
+  df_feat_correct_merged_daily[, (p) := nafill(get(p), type = "locf"), by = TMSID2]
+  df_feat_correct_merged_daily[, (p) := nafill(get(p), type = "nocb"), by = TMSID2]
+  
+  # 다. frollmean을 이용한 시간적 평활화 (Window size = 3일, Center 정렬)
+  # 당일과 전후 하루를 평균하여 단기 노이즈 억제
+  smooth_col_name <- paste0(p, "_smooth")
+  df_feat_correct_merged_daily[, (smooth_col_name) := frollmean(get(p), n = 3, align = "center", fill = NA), by = TMSID2]
+  
+  # 라. 평활화 이후 발생한 양 끝단 NA 재보완
+  df_feat_correct_merged_daily[, (smooth_col_name) := nafill(get(smooth_col_name), type = "locf"), by = TMSID2]
+  df_feat_correct_merged_daily[, (smooth_col_name) := nafill(get(smooth_col_name), type = "nocb"), by = TMSID2]
+}
 
+# 3. 결과 요약 확인
+summary(df_feat_correct_merged_daily[, .(PM10, PM10_smooth, PM25, PM25_smooth)])
+```
 
-# 환경변수 데이터
+# ERA5-Land
 
 ## ERA5-Land 데이터 불러오기
 
@@ -400,143 +491,325 @@ df_feat_correct_merged <- df_res
 ```
 
 ```{r}
-### !!! 다운로드된 zip nc 파일 불러오기 !!!
-
-# 1. 경로 설정 및 파일 목록 정렬
-base_path <- "/members/dhnyu/huimori/daehoon/ERA5_Land"
-# 파일 목록을 정렬하여 2017_12.nc가 가장 먼저 오도록 함
-zip_style_files <- sort(list.files(base_path, pattern = "\\.nc$", full.names = TRUE))
-temp_extract_path <- file.path(tempdir(), "era5_working")
-dir.create(temp_extract_path, showWarnings = FALSE)
-
-var_names_unique <- c("t2m", "ssr", "u10", "v10", "sp", "tp")
-
-# 시작 시점 수정: 2017-12-01 00:00:00 (UTC)
-# KST 기준 2018-01-01의 00시~08시(UTC 전일 15~23시)를 채우기 위함
-start_date <- as.POSIXct("2017-12-01 00:00:00", tz = "UTC")
-
-# 2. 변수별 루프
-for (v in var_names_unique) {
-  message(paste("[Processing Variable]:", v))
-  
-  v_list <- lapply(seq_along(zip_style_files), function(i) {
-    f <- zip_style_files[i]
-    target_subdir <- file.path(temp_extract_path, paste0("m_", i))
-    dir.create(target_subdir, showWarnings = FALSE)
-    
-    # 확장자에 상관없이 ZIP 내부의 data_0.nc 추출
-    unzip(f, files = "data_0.nc", exdir = target_subdir)
-    real_nc <- file.path(target_subdir, "data_0.nc")
-    
-    if (!file.exists(real_nc)) return(NULL)
-    
-    # 래스터 로드 및 변수 선택
-    r <- try(rast(real_nc), silent = TRUE)
-    if (inherits(r, "try-error")) {
-      unlink(target_subdir, recursive = TRUE)
-      return(NULL)
-    }
-    
-    idx <- grep(v, names(r))
-    
-    if (length(idx) == 0) {
-      unlink(target_subdir, recursive = TRUE)
-      return(NULL)
-    }
-    
-    # 메모리에 강제 로드 (산술 연산 활용)
-    res <- r[[idx]] * 1 
-    
-    # 임시 파일 삭제 및 메모리 확보
-    unlink(target_subdir, recursive = TRUE)
-    
-    return(res)
-  })
-  
-  v_list <- v_list[!sapply(v_list, is.null)]
-  
-  if (length(v_list) > 0) {
-    combined_rast <- rast(v_list)
-    
-    # 시간 레이어 이름 할당
-    total_lyrs <- nlyr(combined_rast)
-    # 2017-12-01부터 1시간 단위 시퀀스 생성
-    time_seq <- seq(from = start_date, by = "hour", length.out = total_lyrs)
-    names(combined_rast) <- paste0(v, "_", format(time_seq, "%Y%m%d_%H"))
-    
-    assign(paste0(v, "_raster"), combined_rast, envir = .GlobalEnv)
-    message(paste("[Success]", v, "통합 완료 (총", total_lyrs, "레이어)"))
-  }
-  gc()
-}
-
-# 임시 디렉토리 정리
-unlink(temp_extract_path, recursive = TRUE)
+chr_dir_climate <- "/mnt/hdd001/huimori"
+chr_ERA5_Land_file <- list.files(file.path(chr_dir_climate, "ERA5_Land"), pattern = "\\.nc$", full.names = TRUE)
+chr_CHELSA_files <- list.files(file.path(chr_dir_climate, "Chelsa"), pattern = "\\.nc$", full.names = TRUE)
 ```
-
-## 해상도 축소 작업 (일별 해상도)
 
 ```{r}
-### !!! 모든 변수에 대해 래스터 결과 합치기 !!!
+# 1. 경로 설정 및 파일 목록
+chr_dir_climate <- "/mnt/hdd001/huimori"
+zip_style_files <- sort(chr_ERA5_Land_file)
+temp_extract_path <- file.path(tempdir(), "era5_working")
+dir.create(temp_extract_path, showWarnings = FALSE, recursive = TRUE)
 
-# 1. 온도 단위 변환 (Kelvin -> Celsius)
-t2m_raster_C <- t2m_raster - 273.15
+var_names_unique <- c("t2m", "ssr", "u10", "v10", "sp", "tp")
+start_date_utc <- as.POSIXct("2017-12-01 00:00:00", tz = "UTC")
 
-# 2. 강수량 단위 변환 (m -> mm) 및 누적값 처리
-# ERA5-Land의 tp는 시간당 누적(m)이므로 mm로 변환
-tp_raster_mm <- tp_raster * 1000
+# 2. 모든 파일을 순회하며 변수별 레이어 리스트 생성
+# 결과 구조: list(t2m = list(r1, r2...), ssr = list(r1, r2...), ...)
+all_vars_list <- setNames(lapply(var_names_unique, function(x) list()), var_names_unique)
 
-# 3. 통합 데이터셋 구조화 (SpatRasterDataset)
-# 여러 변수를 하나의 객체로 묶어 관리 (메모리 주소 참조 방식)
-era5_sds <- sds(t2m_raster_C, ssr_raster, u10_raster, v10_raster, sp_raster, tp_raster_mm)
-names(era5_sds) <- c("temp_2m", "solar_rad", "u_wind", "v_wind", "pressure", "precip")
-
-### !!! 시간별자료를 일별자료로 시간해상도 축소 !!!
-
-
-start_t <- as.POSIXct("2017-12-01 00:00:00", tz = "UTC")
-total_hours <- nlyr(t2m_raster) 
-full_time_seq <- seq(from = start_t, by = "hour", length.out = total_hours)
-
-# [핵심] 한국 시간(KST) 기준으로 날짜 인덱스 생성
-daily_index_kst <- as.Date(full_time_seq, tz = "Asia/Seoul")
-
-# SDS 내 모든 SpatRaster에 대해 일단위 평균 적용
-# SDS 내 모든 SpatRaster에 대해 일단위 평균 적용
-era5_daily_list <- lapply(names(era5_sds), function(var_name) {
-  message(paste("[Aggregating]", var_name, "to Daily Mean (KST)..."))
-
-  hrly_rast <- era5_sds[[var_name]]
+message(">>> 압축 해제 및 변수별 데이터 로드 시작...")
+for (i in seq_along(zip_style_files)) {
+  f <- zip_style_files[i]
+  target_subdir <- file.path(temp_extract_path, paste0("m_", i))
+  dir.create(target_subdir, showWarnings = FALSE)
   
-  # 1. 일단위 집계 수행
-  # daily_index_kst의 유니크한 값 순서대로 결과 레이어가 생성됨
-  daily_rast <- tapp(hrly_rast, index = daily_index_kst, fun = mean)
+  unzip(f, files = "data_0.nc", exdir = target_subdir)
+  real_nc <- file.path(target_subdir, "data_0.nc")
   
-  # 2. 필터링 대상 및 인덱스 추출
-  # 전체 기간(2017.12~2024.12) 중 실제 daily_index_kst에 포함된 유니크한 날짜들
-  unique_dates <- sort(unique(daily_index_kst))
-  
-  # 우리가 추출하고자 하는 목표 날짜 (2018-01-01 ~ 2024-12-31)
-  target_dates <- seq(as.Date("2018-01-01"), as.Date("2024-12-31"), by = "day")
-  
-  # 유니크 날짜들 중 목표 날짜에 해당하는 위치(인덱스) 찾기
-  target_idx <- which(unique_dates %in% target_dates)
-  
-  # 3. 레이어 필터링 (인덱스 기반이므로 이름 형식의 영향을 받지 않음)
-  daily_rast_filtered <- daily_rast[[target_idx]]
+  if (file.exists(real_nc)) {
+    r_full <- terra::rast(real_nc)
+    
+    for (v in var_names_unique) {
+      idx <- grep(v, names(r_full))
+      if (length(idx) > 0) {
+        # 메모리에 즉시 로드 후 리스트에 추가
+        all_vars_list[[v]][[i]] <- r_full[[idx]] * 1
+      }
+    }
+  }
+  unlink(target_subdir, recursive = TRUE)
+  if (i %% 5 == 0) message(paste0("Progress: ", i, "/", length(zip_style_files), " files processed."))
+}
 
-  # 4. 레이어 이름 재설정 (YYYYMMDD 형식)
-  # 필터링된 날짜들만 골라내어 이름 부여
-  final_dates <- unique_dates[target_idx]
-  names(daily_rast_filtered) <- paste0(var_name, "_", format(final_dates, "%Y%m%d"))
+# 3. 변수별 SpatRaster 통합 및 단위 변환
+message(">>> 변수별 통합 및 단위 변환 중...")
+processed_rasters <- lapply(names(all_vars_list), function(v) {
+  combined <- terra::rast(all_vars_list[[v]][!sapply(all_vars_list[[v]], is.null)])
+  
+  if (v == "t2m") {
+    combined <- combined - 273.15  # Kelvin to Celsius
+  } else if (v == "tp") {
+    combined <- combined * 1000    # m(meters) to mm
+  } else if (v == "sp") {
+    combined <- combined / 100     # Pa to hPa
+  }
+  return(combined)
+})
+names(processed_rasters) <- var_names_unique
 
-  return(daily_rast_filtered)
+# 4. KST 기반 일 단위 집계 (2018-01-01 ~ 2024-12-31)
+total_hours <- nlyr(processed_rasters[[1]])
+full_time_seq_utc <- seq(from = start_date_utc, by = "hour", length.out = total_hours)
+daily_index_kst <- as.Date(full_time_seq_utc, tz = "Asia/Seoul")
+
+target_dates <- seq(as.Date("2018-01-01"), as.Date("2024-12-31"), by = "day")
+
+era5_daily_list <- lapply(names(processed_rasters), function(v) {
+  message(paste("[Aggregating]", v, "to Daily..."))
+  
+  # tapp을 이용한 일평균 계산
+  daily_rast <- terra::tapp(processed_rasters[[v]], index = daily_index_kst, fun = mean)
+  
+  # 목표 날짜만 필터링 (레이어 이름이 Date 형식이므로 매칭 가능)
+  # tapp 결과 레이어 이름은 보통 "X2018.01.01" 형식이므로 날짜 객체로 변환하여 필터링
+  available_dates <- as.Date(gsub("X", "", names(daily_rast)), format = "%Y.%m.%d")
+  target_idx <- which(available_dates %in% target_dates)
+  
+  final_rast <- daily_rast[[target_idx]]
+  names(final_rast) <- paste0(v, "_", format(available_dates[target_idx], "%Y%m%d"))
+  return(final_rast)
 })
 
-# 일단위 SpatRasterDataset 재구성
-era5_daily_sds <- sds(era5_daily_list)
-names(era5_daily_sds) <- names(era5_sds)
+
+era5_daily_list <- lapply(era5_daily_list, function(r) {
+  terra::crs(r) <- "EPSG:4326"
+  return(r)
+})
+# 5. 최종 SDS 구성
+ras_era5 <- terra::sds(era5_daily_list)
+names(ras_era5) <- c("temp_2m", "solar_rad", "u_wind", "v_wind", "pressure", "precip")
+
+
+# 메모리 정리
+unlink(temp_extract_path, recursive = TRUE)
+gc()
+
+lapply(ras_era5, function(x) {
+  terra::summary(x[[1:5]])
+})
 ```
+
+
+```{r}
+# 기존 merged 데이터에 공간정보 주입
+
+sf_monitors_correct_ref <- sf_monitors_correct %>%
+  dplyr::distinct(TMSID, TMSID2, .keep_all = TRUE) %>%
+  dplyr::select(TMSID, TMSID2, geometry)
+
+# 2. 일간 데이터셋에 공간 정보 조인
+sf_feat_correct_merged_daily <- df_feat_correct_merged_daily %>%
+  dplyr::left_join(sf_monitors_correct_ref, by = c("TMSID", "TMSID2")) %>%
+  sf::st_as_sf()
+
+# 3. 결과 확인
+print(sf_feat_correct_merged_daily)
+```
+
+## 버퍼 값 추출
+
+```{r}
+# 1. 고유 측정소 위치 추출 (TMSID, TMSID2 기준)
+sf_monitors_ref <- sf_monitors_correct %>%
+  dplyr::distinct(TMSID, TMSID2, .keep_all = TRUE) %>%
+  dplyr::select(TMSID, TMSID2)
+
+# 2. 좌표계 통일 (Unified CS -> WGS84)
+# chopin::extract_at 연산을 위해 벡터 데이터를 라스터의 CRS(EPSG:4326)로 변환
+sf_monitors_ref_wgs84 <- sf::st_transform(sf_monitors_ref, terra::crs(ras_era5[1]))
+
+# 1. 변수별 추출 및 Long-format 변환
+climate_extracted_list <- lapply(names(ras_era5), function(var_name) {
+  message(paste(">>> [Extracting]", var_name, "with 30m buffer..."))
+  
+  # 포인트 추출 (30m 버퍼 평균)
+  ext_res <- chopin::extract_at(
+    x = ras_era5[[var_name]],
+    y = sf_monitors_ref_wgs84,
+    id = "TMSID2",
+    func = "mean",
+    radius = 30
+  )
+  
+  # 속성 데이터 추출 및 피벗 대상 식별
+  ext_df <- ext_res %>% sf::st_drop_geometry()
+  target_cols <- setdiff(colnames(ext_df), "TMSID2")
+  
+  # 데이터 구조 재구성
+  ext_long <- ext_df %>%
+    tidyr::pivot_longer(
+      cols = all_of(target_cols), 
+      names_to = "date_raw", 
+      values_to = var_name
+    ) %>%
+    dplyr::mutate(
+      date_str = stringr::str_extract(date_raw, "\\d{8}"),
+      year = as.numeric(substr(date_str, 1, 4)),
+      month = as.numeric(substr(date_str, 5, 6)),
+      day = as.numeric(substr(date_str, 7, 8)),
+      # 고유 식별자 TMSID 매칭
+      TMSID = sf_monitors_ref_wgs84$TMSID[match(TMSID2, sf_monitors_ref_wgs84$TMSID2)]
+    ) %>%
+    # 조인 키와 해당 기상 변수만 선택
+    dplyr::select(TMSID, TMSID2, year, month, day, !!sym(var_name)) %>%
+    dplyr::filter(!is.na(year))
+  
+  return(ext_long)
+})
+
+# 2. 기상 변수 간 통합 (temp, precip, wind 등)
+df_era5_30m_daily <- Reduce(
+  function(x, y) merge(x, y, by = c("TMSID", "TMSID2", "year", "month", "day"), all = TRUE), 
+  climate_extracted_list
+)
+
+df_feat_era5_30m_daily <- sf_feat_correct_merged_daily
+
+setDT(df_feat_era5_30m_daily)
+setDT(df_era5_30m_daily)
+
+target_vars <- names(ras_era5)
+all_possible_bad_cols <- c(target_vars, 
+                           paste0(target_vars, ".x"), 
+                           paste0(target_vars, ".y"))
+
+existing_vars <- intersect(names(df_feat_era5_30m_daily), all_possible_bad_cols)
+
+if(length(existing_vars) > 0) {
+  df_feat_era5_30m_daily[, (existing_vars) := NULL]
+}
+
+df_feat_correct_era5_30m_daily <- merge(
+  df_feat_era5_30m_daily, 
+  df_era5_30m_daily, 
+  by = c("TMSID", "TMSID2", "year", "month", "day"), 
+  all.x = TRUE
+)
+
+df_feat_correct_era5_30m_daily <- df_feat_correct_era5_30m_daily[order(TMSID2, year, month, day)]
+print(tail(df_feat_correct_era5_30m_daily))
+```
+
+## 예측모형 활용
+
+### XGBoost
+
+```{r}
+# 1. 병렬 처리 설정 (mirai_multisession 적용)
+# 200만 행의 데이터 크기를 고려하여
+future::plan(future.mirai::mirai_multisession, workers = 20L)
+
+# 2. 데이터 준비 및 피처 엔지니어링 (data.table 활용)
+setDT(df_feat_correct_era5_30m_daily)
+df_model_ready <- df_feat_correct_era5_30m_daily[
+  !is.na(PM10_smooth) & year >= 2018
+][, `:=`(
+  ws_abs = sqrt(u_wind^2 + v_wind^2),
+  doy = yday(as.Date(paste(year, month, day, sep="-"))),
+  is_weekend = factor(fifelse(wday(as.Date(paste(year, month, day, sep="-"))) %in% c(1, 7), "Yes", "No")),
+  site_type = factor(site_type)
+)]
+
+# 공간 분석을 위해 sf 객체로 유지
+sf_model_ready <- st_as_sf(df_model_ready)
+df_train_full <- sf_model_ready %>% filter(year <= 2022)
+df_test_2023  <- sf_model_ready %>% filter(year == 2023)
+
+# 3. 공간적 블록 교차 검증 (Spatial Block CV)
+set.seed(123)
+spatial_folds <- spatial_block_cv(df_train_full, v = 5)
+
+# 4. 모델 레시피 및 사양 정의
+xgb_recipe <- recipe(PM10_smooth ~ ., data = df_train_full) %>%
+  update_role(TMSID, TMSID2, year, month, day, geometry, starts_with("date"), new_role = "ID") %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())
+
+xgb_spec <- boost_tree(
+  trees = tune(), tree_depth = tune(), learn_rate = tune(), 
+  mtry = tune(), min_n = tune()
+) %>% 
+  set_engine("xgboost", nthread = 1) %>% # 전체 병렬 처리를 future가 관리하므로 내부 nthread는 1로 설정
+  set_mode("regression")
+
+xgb_workflow <- workflow() %>% add_model(xgb_spec) %>% add_recipe(xgb_recipe)
+
+# 5. 하이퍼파라미터 튜닝 (Race ANOVA)
+model_metrics <- metric_set(rmse, mae)
+
+# Race ANOVA를 통한 고속 튜닝 수행
+tune_res <- tune_race_anova(
+  xgb_workflow,
+  resamples = spatial_folds,
+  grid = 20, # Latin Hypercube 기반 자동 그리드 생성
+  metrics = model_metrics,
+  control = control_race(
+    parallel_over = "everything", # future 프레임워크 활용 설정
+    save_pred = TRUE,
+    verbose_elim = TRUE
+  )
+)
+
+# 병렬 세션 종료
+future::plan(sequential)
+
+# 6. 최종 모델 확정 및 2023년 외부 검증
+best_params <- select_best(tune_res, metric = "rmse")
+final_fit <- finalize_workflow(xgb_workflow, best_params) %>% fit(data = df_train_full)
+
+results_2023 <- predict(final_fit, df_test_2023) %>%
+  bind_cols(df_test_2023) %>%
+  st_drop_geometry()
+
+final_performance <- results_2023 %>% model_metrics(truth = PM10_smooth, estimate = .pred)
+print(final_performance)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## 다양한 버퍼 시나리오
 

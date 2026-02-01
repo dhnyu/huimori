@@ -73,7 +73,6 @@ sites_2020_sf <- st_as_sf(sites_2020,
 ### tp: Total precipitation
 ```
 
-
 ```{r}
 ### !!! 다운로드된 zip nc 파일 불러오기 !!!
 
@@ -352,8 +351,6 @@ write_parquet(era_dt_v1, file.path(output_dir, "era_dt_v1.parquet"))
 write_parquet(era_dt_v2, file.path(output_dir, "era_dt_v2.parquet"))
 ```
 
-
-
 # 미세먼지 데이터
 
 ## Air Korea 데이터 불러오기
@@ -461,8 +458,6 @@ message(paste0("제거된 행 수: ", format(removed_n, big.mark=","),
 print(clean_ml_data[1:5, ])
 ```
 
-
-
 ## XGBoost
 
 ```{r}
@@ -691,7 +686,6 @@ for (t_var in targets) {
 message("\n[Random Forest Benchmarking Results]")
 print(final_bench_rf_results[order(target, -R2)])
 ```
-
 
 # 회귀분석 실험 (이전 고려 O)
 
@@ -749,8 +743,6 @@ message(paste0("제거된 행 수: ", format(removed_n, big.mark=","),
 print(clean_ml_data[1:5, ])
 ```
 
-
-
 ## XGBoost
 
 ```{r}
@@ -979,10 +971,3 @@ for (t_var in targets) {
 message("\n[Random Forest Benchmarking Results]")
 print(final_bench_rf_results[order(target, -R2)])
 ```
-
-
-
-
-
-
-

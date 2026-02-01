@@ -516,7 +516,7 @@ temp_extract_path <- file.path(tempdir(), "era5_working")
 dir.create(temp_extract_path, showWarnings = FALSE, recursive = TRUE)
 
 var_names_unique <- c("t2m", "ssr", "u10", "v10", "sp", "tp")
-start_date_utc <- as.POSIXct("2017-12-01 00:00:00", tz = "UTC")
+start_date_utc <- as.POSIXct("2009-12-01 00:00:00", tz = "UTC")
 
 # 2. 모든 파일을 순회하며 변수별 레이어 리스트 생성
 # 결과 구조: list(t2m = list(r1, r2...), ssr = list(r1, r2...), ...)
@@ -562,12 +562,12 @@ processed_rasters <- lapply(names(all_vars_list), function(v) {
 })
 names(processed_rasters) <- var_names_unique
 
-# 4. KST 기반 일 단위 집계 (2018-01-01 ~ 2024-12-31)
+# 4. KST 기반 일 단위 집계 (2010-01-01 ~ 2024-12-31)
 total_hours <- nlyr(processed_rasters[[1]])
 full_time_seq_utc <- seq(from = start_date_utc, by = "hour", length.out = total_hours)
 daily_index_kst <- as.Date(full_time_seq_utc, tz = "Asia/Seoul")
 
-target_dates <- seq(as.Date("2018-01-01"), as.Date("2024-12-31"), by = "day")
+target_dates <- seq(as.Date("2010-01-01"), as.Date("2024-12-31"), by = "day")
 
 era5_daily_list <- lapply(names(processed_rasters), function(v) {
   message(paste("[Aggregating]", v, "to Daily..."))
@@ -576,7 +576,7 @@ era5_daily_list <- lapply(names(processed_rasters), function(v) {
   daily_rast <- terra::tapp(processed_rasters[[v]], index = daily_index_kst, fun = mean)
   
   # 목표 날짜만 필터링 (레이어 이름이 Date 형식이므로 매칭 가능)
-  # tapp 결과 레이어 이름은 보통 "X2018.01.01" 형식이므로 날짜 객체로 변환하여 필터링
+  # tapp 결과 레이어 이름은 보통 "X2010.01.01" 형식이므로 날짜 객체로 변환하여 필터링
   available_dates <- as.Date(gsub("X", "", names(daily_rast)), format = "%Y.%m.%d")
   target_idx <- which(available_dates %in% target_dates)
   
@@ -719,7 +719,7 @@ vec_keep_cols <- c(
 )
 
 df_model_ready <- df_feat_correct_era5_30m_daily[
-  !is.na(PM10_smooth) & year >= 2018, 
+  !is.na(PM10_smooth) & year >= 2010, 
   ..vec_keep_cols
 ][, `:=`(
   ws_abs = sqrt(u_wind^2 + v_wind^2),
@@ -730,8 +730,8 @@ df_model_ready <- df_feat_correct_era5_30m_daily[
 )]
 
 sf_model_ready <- st_as_sf(df_model_ready)
-df_train_full <- sf_model_ready %>% filter(year <= 2022)
-df_test_2023  <- sf_model_ready %>% filter(year == 2023)
+df_train_full <- sf_model_ready %>% filter(year <= 2021)
+df_test_full  <- sf_model_ready %>% filter(year >= 2022)
 
 # 2. 공간적 블록 교차 검증 생성 -------------------------------------------
 set.seed(123)
@@ -786,14 +786,14 @@ end_time <- Sys.time()
 message(paste(">>> 학습 소요 시간:", round(end_time - start_time, 2), "초"))
 
 # 5. 2023년 외부 검증 -----------------------------------------------------
-results_2023 <- predict(final_fit, df_test_2023) %>%
-  bind_cols(df_test_2023) %>%
+results_df <- predict(final_fit, df_test_full) %>%
+  bind_cols(df_test_full) %>%
   st_drop_geometry()
 
-final_performance <- results_2023 %>% 
+final_performance <- results_df %>% 
   model_metrics(truth = PM10_smooth, estimate = .pred)
 
-print("--- 2023 Final Test Performance for PM10 ---")
+print("--- Final Test Performance for PM10 ---")
 print(final_performance)
 ```
 
@@ -809,7 +809,7 @@ vec_keep_cols <- c(
 )
 
 df_model_ready <- df_feat_correct_era5_30m_daily[
-  !is.na(PM25_smooth) & year >= 2018, 
+  !is.na(PM25_smooth) & year >= 2010, 
   ..vec_keep_cols
 ][, `:=`(
   ws_abs = sqrt(u_wind^2 + v_wind^2),
@@ -820,8 +820,8 @@ df_model_ready <- df_feat_correct_era5_30m_daily[
 )]
 
 sf_model_ready <- st_as_sf(df_model_ready)
-df_train_full <- sf_model_ready %>% filter(year <= 2022)
-df_test_2023  <- sf_model_ready %>% filter(year == 2023)
+df_train_full <- sf_model_ready %>% filter(year <= 2021)
+df_test_full  <- sf_model_ready %>% filter(year >= 2022)
 
 # 2. 공간적 블록 교차 검증 생성 -------------------------------------------
 set.seed(123)
@@ -876,14 +876,14 @@ end_time <- Sys.time()
 message(paste(">>> 학습 소요 시간:", round(end_time - start_time, 2), "초"))
 
 # 5. 2023년 외부 검증 -----------------------------------------------------
-results_2023 <- predict(final_fit, df_test_2023) %>%
-  bind_cols(df_test_2023) %>%
+results_df <- predict(final_fit, df_test_full) %>%
+  bind_cols(df_test_full) %>%
   st_drop_geometry()
 
-final_performance <- results_2023 %>% 
+final_performance <- results_df %>% 
   model_metrics(truth = PM25_smooth, estimate = .pred)
 
-print("--- 2023 Final Test Performance for PM25 ---")
+print("--- Final Test Performance for PM25 ---")
 print(final_performance)
 ```
 
@@ -987,7 +987,7 @@ vec_keep_cols <- c(
 )
 
 df_model_ready <- df_feat_correct_era5_100m_daily[
-  !is.na(PM10_smooth) & year >= 2018, 
+  !is.na(PM10_smooth) & year >= 2010, 
   ..vec_keep_cols
 ][, `:=`(
   ws_abs = sqrt(u_wind^2 + v_wind^2),
@@ -998,8 +998,8 @@ df_model_ready <- df_feat_correct_era5_100m_daily[
 )]
 
 sf_model_ready <- st_as_sf(df_model_ready)
-df_train_full <- sf_model_ready %>% filter(year <= 2022)
-df_test_2023  <- sf_model_ready %>% filter(year == 2023)
+df_train_full <- sf_model_ready %>% filter(year <= 2021)
+df_test_full  <- sf_model_ready %>% filter(year >= 2022)
 
 # 2. 공간적 블록 교차 검증 생성 -------------------------------------------
 set.seed(123)
@@ -1054,14 +1054,14 @@ end_time <- Sys.time()
 message(paste(">>> 학습 소요 시간:", round(end_time - start_time, 2), "초"))
 
 # 5. 2023년 외부 검증 -----------------------------------------------------
-results_2023 <- predict(final_fit, df_test_2023) %>%
-  bind_cols(df_test_2023) %>%
+results_df <- predict(final_fit, df_test_full) %>%
+  bind_cols(df_test_full) %>%
   st_drop_geometry()
 
-final_performance <- results_2023 %>% 
+final_performance <- results_df %>% 
   model_metrics(truth = PM10_smooth, estimate = .pred)
 
-print("--- 2023 Final Test Performance for PM10 ---")
+print("--- Final Test Performance for PM10 ---")
 print(final_performance)
 ```
 
@@ -1077,7 +1077,7 @@ vec_keep_cols <- c(
 )
 
 df_model_ready <- df_feat_correct_era5_100m_daily[
-  !is.na(PM25_smooth) & year >= 2018, 
+  !is.na(PM25_smooth) & year >= 2010, 
   ..vec_keep_cols
 ][, `:=`(
   ws_abs = sqrt(u_wind^2 + v_wind^2),
@@ -1088,8 +1088,8 @@ df_model_ready <- df_feat_correct_era5_100m_daily[
 )]
 
 sf_model_ready <- st_as_sf(df_model_ready)
-df_train_full <- sf_model_ready %>% filter(year <= 2022)
-df_test_2023  <- sf_model_ready %>% filter(year == 2023)
+df_train_full <- sf_model_ready %>% filter(year <= 2021)
+df_test_full  <- sf_model_ready %>% filter(year >= 2022)
 
 # 2. 공간적 블록 교차 검증 생성 -------------------------------------------
 set.seed(123)
@@ -1144,14 +1144,14 @@ end_time <- Sys.time()
 message(paste(">>> 학습 소요 시간:", round(end_time - start_time, 2), "초"))
 
 # 5. 2023년 외부 검증 -----------------------------------------------------
-results_2023 <- predict(final_fit, df_test_2023) %>%
-  bind_cols(df_test_2023) %>%
+results_df <- predict(final_fit, df_test_full) %>%
+  bind_cols(df_test_full) %>%
   st_drop_geometry()
 
-final_performance <- results_2023 %>% 
+final_performance <- results_df %>% 
   model_metrics(truth = PM25_smooth, estimate = .pred)
 
-print("--- 2023 Final Test Performance for PM25 ---")
+print("--- Final Test Performance for PM25 ---")
 print(final_performance)
 ```
 
@@ -1255,7 +1255,7 @@ vec_keep_cols <- c(
 )
 
 df_model_ready <- df_feat_correct_era5_1000m_daily[
-  !is.na(PM10_smooth) & year >= 2018, 
+  !is.na(PM10_smooth) & year >= 2010, 
   ..vec_keep_cols
 ][, `:=`(
   ws_abs = sqrt(u_wind^2 + v_wind^2),
@@ -1266,8 +1266,8 @@ df_model_ready <- df_feat_correct_era5_1000m_daily[
 )]
 
 sf_model_ready <- st_as_sf(df_model_ready)
-df_train_full <- sf_model_ready %>% filter(year <= 2022)
-df_test_2023  <- sf_model_ready %>% filter(year == 2023)
+df_train_full <- sf_model_ready %>% filter(year <= 2021)
+df_test_full  <- sf_model_ready %>% filter(year >= 2022)
 
 # 2. 공간적 블록 교차 검증 생성 -------------------------------------------
 set.seed(123)
@@ -1322,14 +1322,14 @@ end_time <- Sys.time()
 message(paste(">>> 학습 소요 시간:", round(end_time - start_time, 2), "초"))
 
 # 5. 2023년 외부 검증 -----------------------------------------------------
-results_2023 <- predict(final_fit, df_test_2023) %>%
-  bind_cols(df_test_2023) %>%
+results_df <- predict(final_fit, df_test_full) %>%
+  bind_cols(df_test_full) %>%
   st_drop_geometry()
 
-final_performance <- results_2023 %>% 
+final_performance <- results_df %>% 
   model_metrics(truth = PM10_smooth, estimate = .pred)
 
-print("--- 2023 Final Test Performance for PM10 ---")
+print("--- Final Test Performance for PM10 ---")
 print(final_performance)
 ```
 
@@ -1345,7 +1345,7 @@ vec_keep_cols <- c(
 )
 
 df_model_ready <- df_feat_correct_era5_1000m_daily[
-  !is.na(PM25_smooth) & year >= 2018, 
+  !is.na(PM25_smooth) & year >= 2010, 
   ..vec_keep_cols
 ][, `:=`(
   ws_abs = sqrt(u_wind^2 + v_wind^2),
@@ -1356,8 +1356,8 @@ df_model_ready <- df_feat_correct_era5_1000m_daily[
 )]
 
 sf_model_ready <- st_as_sf(df_model_ready)
-df_train_full <- sf_model_ready %>% filter(year <= 2022)
-df_test_2023  <- sf_model_ready %>% filter(year == 2023)
+df_train_full <- sf_model_ready %>% filter(year <= 2021)
+df_test_full  <- sf_model_ready %>% filter(year >= 2022)
 
 # 2. 공간적 블록 교차 검증 생성 -------------------------------------------
 set.seed(123)
@@ -1412,14 +1412,14 @@ end_time <- Sys.time()
 message(paste(">>> 학습 소요 시간:", round(end_time - start_time, 2), "초"))
 
 # 5. 2023년 외부 검증 -----------------------------------------------------
-results_2023 <- predict(final_fit, df_test_2023) %>%
-  bind_cols(df_test_2023) %>%
+results_df <- predict(final_fit, df_test_full) %>%
+  bind_cols(df_test_full) %>%
   st_drop_geometry()
 
-final_performance <- results_2023 %>% 
+final_performance <- results_df %>% 
   model_metrics(truth = PM25_smooth, estimate = .pred)
 
-print("--- 2023 Final Test Performance for PM25 ---")
+print("--- Final Test Performance for PM25 ---")
 print(final_performance)
 ```
 

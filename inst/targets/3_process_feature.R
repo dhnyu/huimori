@@ -422,16 +422,25 @@ list_process_feature <-
       command = {
         landuse_ras <-
           terra::rast(chr_landuse_freq_file)
-        chopin::extract_at(
+        extracted <- chopin::extract_at(
           x = landuse_ras,
           y = sf_monitors_correct,
           radius = 100,
-          func = "frac",
+          func = "mean",   
           force_df = TRUE
         )
+        colnames(extracted) <- gsub(".*class ", "lc_", colnames(extracted))
+        this_year <- as.numeric(gsub(".*_([0-9]{4})\\.tif", "\\1", chr_landuse_freq_file))
+        extracted$data_year <- this_year
+        extracted$TMSID2 <- sf_monitors_correct$TMSID2
+        extracted$monitor_year <- sf_monitors_correct$year
+        
+        # 현재 토지피복 연도가 측정소 연도보다 1년 전인 행만 유지 (그러면 84140행에서 6010행으로 감소)
+        # 예를 들어, 2010년 측정소에는 2009년 토지피복 정보만, 2023년 측정소에는 2022년 토지피복 정보만 매칭시키고, 나머지는 삭제
+        extracted_filtered <- extracted[extracted$monitor_year == (this_year + 1), ]
+        extracted_filtered
       },
       pattern = map(chr_landuse_freq_file),
-      iteration = "list",
       resources = targets::tar_resources(
         crew = targets::tar_resources_crew(controller = "controller_20")
       )
@@ -545,29 +554,40 @@ list_process_feature <-
     targets::tar_target(
       name = df_feat_correct_merged,
       command = {
-        df_res <- sf_monitors_correct |>
-          dplyr::left_join(
-            df_feat_correct_d_road, 
-            by = c("TMSID", "TMSID2", "year")
-          )
-        
-        df_res <- df_res |>
+        df_res <-
+          purrr::reduce(
+            .x =
+              list(
+                sf_monitors_correct,
+                df_feat_correct_d_road
+              ),
+            .f = collapse::join,
+            on = c("TMSID", "TMSID2", "year")
+          ) %>%
+          dplyr::bind_cols(
+            df_feat_correct_landuse
+          ) %>%
           dplyr::mutate(
-            # dsm 변수가 정의되어 있지 않다면 제외하거나 dem으로 대체 가능
-            # dsm = as.numeric(unlist(df_feat_correct_dsm)), 
-            dem = as.numeric(unlist(df_feat_correct_dem)),
-            mtpi = as.numeric(unlist(df_feat_correct_mtpi)),
-            mtpi_1km = as.numeric(unlist(df_feat_correct_mtpi_1km)),
-            n_emittors_watershed = as.numeric(unlist(df_feat_correct_emittors$n_emittors_watershed))
-          )
-
-        df_feat_correct_merged <- df_res |>
+            dsm = unlist(df_feat_correct_dsm),
+            dem = unlist(df_feat_correct_dem),
+            n_emittors_watershed = unlist(df_feat_correct_emittors$n_emittors_watershed),
+            mtpi = unlist(df_feat_correct_mtpi),
+            mtpi_1km = unlist(df_feat_correct_mtpi_1km)
+          ) %>%
           dplyr::mutate(
             d_road = as.numeric(d_road) / 1000,
-            n_emittors_watershed = ifelse(is.na(n_emittors_watershed), 0, n_emittors_watershed)
-          ) |> sf::st_drop_geometry()
-        
-        df_feat_correct_merged
+            dsm = as.numeric(dsm),
+            dem = as.numeric(dem),
+            mtpi = as.numeric(mtpi),
+            n_emittors_watershed =
+              ifelse(
+                is.na(n_emittors_watershed), 0,
+                as.numeric(n_emittors_watershed)
+              )
+          ) %>%
+          sf::st_drop_geometry()
+        names(df_res) <- sub("mean.", "", names(df_res))
+        df_res
       }
     ),
     # Incorrect addresses
@@ -938,8 +958,10 @@ list_process_feature <-
 ### df_feat_grid_merged 수정: 일반 공간변수(593)와 시공간변수(8302, road/landuse)를 같은 길이로 매핑하도록 수정.
 
 
-
-
+## 2026.02.05
+### df_feat_correct_landuse 수정:
+#### (1) landuse_ras <- terra::rast(chr_landuse_freq_file)는 실수형이 아니라 비율형이기 때문에 `chopin::extract_at(func="frac")`을 `chopin::extract_at(func="mean")`로 수정.
+#### (2) 현재 토지피복 연도가 측정소 연도보다 1년 전인 행만 유지하기기
 
 
 

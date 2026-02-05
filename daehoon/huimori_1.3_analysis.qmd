@@ -352,8 +352,6 @@ names(sample_ras)
 
 
 ```{r}
-#| eval: false
-
 # 1. 병렬 처리 설정
 plan(mirai_multisession, workers = 16)
 

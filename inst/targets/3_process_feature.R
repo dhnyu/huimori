@@ -433,11 +433,11 @@ list_process_feature <-
         this_year <- as.numeric(gsub(".*_([0-9]{4})\\.tif", "\\1", chr_landuse_freq_file))
         extracted$data_year <- this_year
         extracted$TMSID2 <- sf_monitors_correct$TMSID2
-        extracted$monitor_year <- sf_monitors_correct$year
+        extracted$year <- sf_monitors_correct$year
         
         # 현재 토지피복 연도가 측정소 연도보다 1년 전인 행만 유지 (그러면 84140행에서 6010행으로 감소)
         # 예를 들어, 2010년 측정소에는 2009년 토지피복 정보만, 2023년 측정소에는 2022년 토지피복 정보만 매칭시키고, 나머지는 삭제
-        extracted_filtered <- extracted[extracted$monitor_year == (this_year + 1), ]
+        extracted_filtered <- extracted[extracted$year == (this_year + 1), ]
         extracted_filtered
       },
       pattern = map(chr_landuse_freq_file),

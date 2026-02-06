@@ -564,40 +564,35 @@ list_process_feature <-
     targets::tar_target(
       name = df_feat_correct_merged,
       command = {
-        df_res <-
-          purrr::reduce(
-            .x =
-              list(
-                sf_monitors_correct,
-                df_feat_correct_d_road
-              ),
-            .f = collapse::join,
-            on = c("TMSID", "TMSID2", "year")
-          ) %>%
-          dplyr::bind_cols(
-            df_feat_correct_landuse
-          ) %>%
+        purrr::reduce(
+          .x = list(
+            sf_monitors_correct,
+            df_feat_correct_d_road
+          ),
+          .f = collapse::join,
+          on = c("TMSID", "TMSID2", "year")
+        ) %>%
+          # 3. 리스트 형태의 데이터 추출 및 컬럼 추가
           dplyr::mutate(
             dsm = unlist(df_feat_correct_dsm),
             dem = unlist(df_feat_correct_dem),
-            n_emittors_watershed = unlist(df_feat_correct_emittors$n_emittors_watershed),
+            # n_emittors_watershed = unlist(df_feat_correct_emittors$n_emittors_watershed),
             mtpi = unlist(df_feat_correct_mtpi),
             mtpi_1km = unlist(df_feat_correct_mtpi_1km)
           ) %>%
+          # 4. 단위 변환 및 데이터 타입 정제
           dplyr::mutate(
-            d_road = as.numeric(d_road) / 1000,
+            d_road = as.numeric(d_road) / 1000,           # m 단위를 km로 변환
             dsm = as.numeric(dsm),
             dem = as.numeric(dem),
             mtpi = as.numeric(mtpi),
-            n_emittors_watershed =
-              ifelse(
-                is.na(n_emittors_watershed), 0,
-                as.numeric(n_emittors_watershed)
-              )
+            # n_emittors_watershed = ifelse(is.na(n_emittors_watershed), 0, as.numeric(n_emittors_watershed))
           ) %>%
-          sf::st_drop_geometry()
-        names(df_res) <- sub("mean.", "", names(df_res))
-        df_res
+          # 4. 토지 이용 데이터 옆으로 결합
+          dplyr::bind_cols(
+            df_feat_correct_landuse %>% dplyr::select(dplyr::starts_with("lc"))
+          ) %>%
+          as.data.frame()
       }
     ),
     # Incorrect addresses
@@ -978,5 +973,5 @@ list_process_feature <-
 #### (1) 시간 밀림 보정 (time zone 정보가 없어서 시간별 미세먼지 데이터의 시간이 9시간씩 밀려있었음.)
 #### (2) 대기질 농도에서 음수값(-999로 기록됨)은 결측치 처리
 
-
+### df_feat_correct_merged 수정: landuse 변경사항에 맞게 수정
 

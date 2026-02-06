@@ -3,7 +3,17 @@ list_process_site <-
   list(
     targets::tar_target(
       name = dt_measurements,
-      command = nanoparquet::read_parquet(chr_measurement_file)
+      command = {
+        dt <- data.table::as.data.table(nanoparquet::read_parquet(chr_measurement_file))
+        # 시간 밀림 보정 (9시간 가산)
+        dt[, datehour := datehour + lubridate::hours(9)]
+        dt[, date := data.table::as.IDate(date + lubridate::hours(9))]
+        # 음수값(-999)은 일괄적으로 결측치(NA) 처리
+        cols_to_fix <- c("SO2", "CO", "O3", "NO2", "PM10", "PM25")
+        dt[, (cols_to_fix) := lapply(.SD, function(x) ifelse(x < 0, NA, x)), 
+           .SDcols = cols_to_fix]
+        dt
+      }
     ),
     targets::tar_target(
       name = sf_monitors_base,
@@ -961,10 +971,12 @@ list_process_feature <-
 ## 2026.02.05
 ### df_feat_correct_landuse 수정:
 #### (1) landuse_ras <- terra::rast(chr_landuse_freq_file)는 실수형이 아니라 비율형이기 때문에 `chopin::extract_at(func="frac")`을 `chopin::extract_at(func="mean")`로 수정.
-#### (2) 현재 토지피복 연도가 측정소 연도보다 1년 전인 행만 유지하기기
+#### (2) 현재 토지피복 연도가 측정소 연도보다 1년 전인 행만 유지하기.
 
-
-
+## 2026.02.06
+### dt_measurements 수정:
+#### (1) 시간 밀림 보정 (time zone 정보가 없어서 시간별 미세먼지 데이터의 시간이 9시간씩 밀려있었음.)
+#### (2) 대기질 농도에서 음수값(-999로 기록됨)은 결측치 처리
 
 
 

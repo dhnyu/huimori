@@ -850,9 +850,8 @@ tuning_results_list <- furrr::future_map(all_targets, function(target) {
      globals = list(df_train_full = df_train_full, 
                     df_test_full = df_test_full,
                     id_vars_pool = id_vars_pool,
-                    all_targets = all_targets,
-                    max_size = max_size),
-     packages = c("tidymodels", "spatialsample", "finetune", "xgboost", "dplyr", "tidyr")
+                    all_targets = all_targets),
+     packages = c("tidymodels", "spatialsample", "finetune", "xgboost", "dplyr", "tidyr", "sf")
    ))
 
 # 3. 결과 통합
@@ -1155,9 +1154,8 @@ tuning_results_list <- furrr::future_map(all_targets, function(target) {
      globals = list(df_train_full = df_train_full, 
                     df_test_full = df_test_full,
                     id_vars_pool = id_vars_pool,
-                    all_targets = all_targets,
-                    max_size = max_size),
-     packages = c("tidymodels", "spatialsample", "finetune", "xgboost", "dplyr", "tidyr")
+                    all_targets = all_targets),
+     packages = c("tidymodels", "spatialsample", "finetune", "xgboost", "dplyr", "tidyr", "sf")
    ))
 
 # 3. 결과 통합

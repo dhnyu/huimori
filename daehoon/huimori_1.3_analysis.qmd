@@ -1635,11 +1635,11 @@ print("--- PM25 모델 성능 순위 ---")
 print(summary_pm25)
 
 write.csv(summary_pm10, 
-          file = file.path(target_dir, "summary_performance_era5_pm10_30m.csv"), 
+          file = file.path(target_dir, "summary_performance_chelsa_pm10_30m.csv"), 
           row.names = FALSE)
 
 write.csv(summary_pm25, 
-          file = file.path(target_dir, "summary_performance_era5_pm25_30m.csv"), 
+          file = file.path(target_dir, "summary_performance_chelsa_pm25_30m.csv"), 
           row.names = FALSE)
 ```
 
@@ -1849,11 +1849,11 @@ print("--- PM25 모델 성능 순위 ---")
 print(summary_pm25)
 
 write.csv(summary_pm10, 
-          file = file.path(target_dir, "summary_performance_era5_pm10_100m.csv"), 
+          file = file.path(target_dir, "summary_performance_chelsa_pm10_100m.csv"), 
           row.names = FALSE)
 
 write.csv(summary_pm25, 
-          file = file.path(target_dir, "summary_performance_era5_pm25_100m.csv"), 
+          file = file.path(target_dir, "summary_performance_chelsa_pm25_100m.csv"), 
           row.names = FALSE)
 ```
 
@@ -2062,11 +2062,11 @@ print("--- PM25 모델 성능 순위 ---")
 print(summary_pm25)
 
 write.csv(summary_pm10, 
-          file = file.path(target_dir, "summary_performance_era5_pm10_1000m.csv"), 
+          file = file.path(target_dir, "summary_performance_chelsa_pm10_1000m.csv"), 
           row.names = FALSE)
 
 write.csv(summary_pm25, 
-          file = file.path(target_dir, "summary_performance_era5_pm25_1000m.csv"), 
+          file = file.path(target_dir, "summary_performance_chelsa_pm25_1000m.csv"), 
           row.names = FALSE)
 ```
 

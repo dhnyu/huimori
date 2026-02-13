@@ -1,0 +1,32 @@
+<PAMDataset>
+  <Metadata>
+    <MDI key="data#data_scale">10</MDI>
+    <MDI key="data#name">air temperature</MDI>
+    <MDI key="data#transform">value = data / data_scale</MDI>
+    <MDI key="data#unit">C</MDI>
+    <MDI key="NC_GLOBAL#grid_nx">2049</MDI>
+    <MDI key="NC_GLOBAL#grid_ny">2049</MDI>
+    <MDI key="NC_GLOBAL#grid_size">0.5</MDI>
+    <MDI key="NC_GLOBAL#map_nx">2048</MDI>
+    <MDI key="NC_GLOBAL#map_ny">2048</MDI>
+    <MDI key="NC_GLOBAL#map_pro">Lambert Conformal Conic Projection</MDI>
+    <MDI key="NC_GLOBAL#map_slat">38</MDI>
+    <MDI key="NC_GLOBAL#map_slon">126</MDI>
+    <MDI key="NC_GLOBAL#map_sx">880</MDI>
+    <MDI key="NC_GLOBAL#map_sy">1540</MDI>
+    <MDI key="NC_GLOBAL#product_type">SFC_GRID_ta_</MDI>
+    <MDI key="NC_GLOBAL#stn_num">1215</MDI>
+    <MDI key="NC_GLOBAL#time">{2024,12,31,23,55,0}</MDI>
+    <MDI key="NC_GLOBAL#time_in">{2025,9,4,19,27,58}</MDI>
+    <MDI key="NC_GLOBAL#title">SFC GRID FILE</MDI>
+    <MDI key="NC_GLOBAL#version">0</MDI>
+  </Metadata>
+  <PAMRasterBand band="1">
+    <Metadata>
+      <MDI key="STATISTICS_MINIMUM">-9990</MDI>
+      <MDI key="STATISTICS_MAXIMUM">77</MDI>
+      <MDI key="STATISTICS_MEAN">-8377.4914270932</MDI>
+      <MDI key="STATISTICS_STDDEV">3673.3872708911</MDI>
+    </Metadata>
+  </PAMRasterBand>
+</PAMDataset>

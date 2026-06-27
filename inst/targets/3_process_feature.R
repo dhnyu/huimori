@@ -1,4 +1,3 @@
-
 list_process_site <-
   list(
     targets::tar_target(
@@ -10,8 +9,9 @@ list_process_site <-
         dt[, date := data.table::as.IDate(date + lubridate::hours(9))]
         # 음수값(-999)은 일괄적으로 결측치(NA) 처리
         cols_to_fix <- c("SO2", "CO", "O3", "NO2", "PM10", "PM25")
-        dt[, (cols_to_fix) := lapply(.SD, function(x) ifelse(x < 0, NA, x)), 
-           .SDcols = cols_to_fix]
+        dt[, (cols_to_fix) := lapply(.SD, function(x) ifelse(x < 0, NA, x)),
+          .SDcols = cols_to_fix
+        ]
         dt
       }
     ),
@@ -46,9 +46,9 @@ list_process_site <-
           # Assign first and last row
           dplyr::mutate(
             date_start =
-            replace(date_start, dplyr::row_number() == 1, unique(fill_date(date_start, min(year), TRUE))),
+              replace(date_start, dplyr::row_number() == 1, unique(fill_date(date_start, min(year), TRUE))),
             date_end =
-            replace(date_end, dplyr::row_number() == dplyr::n(), unique(fill_date(date_end, max(year_max), start = FALSE)))
+              replace(date_end, dplyr::row_number() == dplyr::n(), unique(fill_date(date_end, max(year_max), start = FALSE)))
           ) |>
           # if no location changes were detected and date_start and date_end are NAs,
           # use the minimum year to assign date_start and
@@ -59,7 +59,7 @@ list_process_site <-
           ) |>
           dplyr::filter(!(is.na(date_start) & is.na(date_end))) |>
           dplyr::mutate(
-            #date_start = ifelse(is.na(date_start), dplyr::lead(date_end), date_start)#,
+            # date_start = ifelse(is.na(date_start), dplyr::lead(date_end), date_start)#,
             date_end = ifelse(is.na(date_end), dplyr::lead(date_end), date_end)
           ) |>
           dplyr::ungroup() |>
@@ -70,11 +70,15 @@ list_process_site <-
           )
 
         check_lookup <-
-          c("[도시대기측정망]", "[도로변대기측정망]", "[PM2.5성분측정망]", "[교외대기측정망]",
-            "[항만측정망]", "[국가배경농도(도서)측정망]", "[대기오염집중측정망]")
+          c(
+            "[도시대기측정망]", "[도로변대기측정망]", "[PM2.5성분측정망]", "[교외대기측정망]",
+            "[항만측정망]", "[국가배경농도(도서)측정망]", "[대기오염집중측정망]"
+          )
         target_lookup <-
-          c("Urban", "Roadside", "PM2.5", "Suburban",
-            "Port", "Island", "Concentrated")
+          c(
+            "Urban", "Roadside", "PM2.5", "Suburban",
+            "Port", "Island", "Concentrated"
+          )
 
         # Grand lookup table for temporal join
         sites_ch <- sites_c |>
@@ -102,7 +106,6 @@ list_process_site <-
     targets::tar_target(
       name = sf_monitors_correct,
       command = {
-
         ak_sites_annual <- huimori::summarize_annual(
           data = dt_measurements,
           timeflag = "date"
@@ -130,7 +133,7 @@ list_process_site <-
             year_all = purrr::map(data, function(df) {
               # compute year_start, year_end from df
               ystart <- lubridate::year(df$date_start)
-              yend   <- lubridate::year(df$date_end)
+              yend <- lubridate::year(df$date_end)
               data.frame(year = seq(ystart, yend))
             })
           ) %>%
@@ -152,7 +155,6 @@ list_process_site <-
           ) |>
           dplyr::filter(!sf::st_is_empty(geometry))
         sites_sf
-
       }
     ),
     # sf_monitors_correct branched by year (subset by year)
@@ -177,12 +179,13 @@ list_process_site <-
     targets::tar_target(
       name = sf_monitors_incorrect,
       command = {
-
         path <- file.path(
           chr_dir_git, "data/sites",
           "station_original_cleaned_20250221.rds"
         )
         sites_orig <- readRDS(path)
+        sites_orig$date_start <- as.Date(unclass(sites_orig$date_start), origin = "1970-01-01")
+        sites_orig$date_end <- as.Date(unclass(sites_orig$date_end), origin = "1970-01-01")
         sites_orig_lean <-
           sites_orig |>
           dplyr::filter(grepl("(도시|종합|도로|교외|항만|배경|도서)", site_type)) |>
@@ -232,7 +235,7 @@ list_process_site <-
           dplyr::rowwise() |>
           dplyr::mutate(
             dist_m =
-            geosphere::distGeo(c(lon, lat), c(lono, lato))
+              geosphere::distGeo(c(lon, lat), c(lono, lato))
           ) |>
           dplyr::ungroup()
 
@@ -307,6 +310,16 @@ list_process_site <-
       command = {
         points_use <- sf_monitors_incorrect |>
           dplyr::filter(!sf::st_is_empty(geometry))
+        if (!reticulate::py_module_available("ee")) {
+          warning("earthengine-api is not available in the active Python; returning empty wind features")
+          return(data.frame(
+            TMSID = character(),
+            TMSID2 = character(),
+            date = as.Date(character()),
+            wind_speed_10m = numeric(),
+            wind_dir_deg = numeric()
+          ))
+        }
         start_date <- min(dt_measurements$date)
         end_date <- max(dt_measurements$date)
 
@@ -337,6 +350,19 @@ list_process_site <-
       command = {
         points_use <- sf_monitors_incorrect |>
           dplyr::filter(!sf::st_is_empty(geometry))
+        if (!reticulate::py_module_available("ee")) {
+          warning("earthengine-api is not available in the active Python; returning NA building-density features")
+          return(
+            points_use |>
+              sf::st_drop_geometry() |>
+              dplyr::transmute(
+                TMSID = as.character(TMSID),
+                TMSID2 = as.character(TMSID2),
+                year = as.integer(year),
+                building_density = NA_real_
+              )
+          )
+        }
         yrs <- sort(unique(points_use$year))
 
         gee_extract_building_density(
@@ -351,31 +377,39 @@ list_process_site <-
       name = ras_landuse_freq,
       command = {
         # the last file should be fixed when years are branched
+        preprocessed_file <- file.path(chr_dir_data, "landuse", "glc_freq_2022.tif")
+        if (file.exists(preprocessed_file)) {
+          return(preprocessed_file)
+        }
+
         landuse_ras <-
-          terra::rast(chr_landuse_files[length(chr_landuse_files)], win = c(124, 132.5, 33, 38.6))
+          terra::rast(chr_landuse_files[length(chr_landuse_files)]) |>
+          terra::crop(terra::ext(124, 132.5, 33, 38.6))
 
         flt7 <-
           matrix(
-            c(0, 0, 1, 1, 1, 0, 0,
+            c(
+              0, 0, 1, 1, 1, 0, 0,
               0, 1, 1, 1, 1, 1, 0,
               1, 1, 1, 1, 1, 1, 1,
               1, 1, 1, 1, 1, 1, 1,
               1, 1, 1, 1, 1, 1, 1,
               0, 1, 1, 1, 1, 1, 0,
-              0, 0, 1, 1, 1, 0, 0),
+              0, 0, 1, 1, 1, 0, 0
+            ),
             nrow = 7, ncol = 7, byrow = TRUE
           )
-          ras_res <-
-            huimori::rasterize_freq(
-              ras = landuse_ras,
-              mat = flt7
-            )
-          terra::writeRaster(
-            x = ras_res,
-            filename = file.path(chr_dir_data, "landuse_freq_glc_fcs30d_2022.tif"),
-            overwrite = TRUE
+        ras_res <-
+          huimori::rasterize_freq(
+            ras = landuse_ras,
+            mat = flt7
           )
-          TRUE
+        terra::writeRaster(
+          x = ras_res,
+          filename = preprocessed_file,
+          overwrite = TRUE
+        )
+        preprocessed_file
       }
     )
   )
@@ -386,12 +420,12 @@ list_process_split <-
   list(
     targets::tar_target(
       name = int_grid_size,
-      command = c(30L),#, 100, 250, 500),
+      command = c(30L), # , 100, 250, 500),
       iteration = "list"
     ),
     targets::tar_target(
       name = int_size_split,
-      command = c(70L),#, 20L, 10L, 2L),
+      command = c(70L), # , 20L, 10L, 2L),
       iteration = "list"
     ),
     targets::tar_target(
@@ -407,8 +441,7 @@ list_process_split <-
           chunks = 40L
         )
         sf::st_as_sf(korea_grid)
-      }
-      ,
+      },
       pattern = map(int_grid_size),
       iteration = "vector"
     ),
@@ -460,29 +493,29 @@ list_process_split <-
       name = int_split_grid_ids,
       command = seq_len(nrow(sf_grid_correct_split)),
       iteration = "list"
-    ),
-    targets::tar_target(
-      list_pred_calc_grid_old,
-      command = {
-        grid_unit <- sf::st_bbox(sf_grid_correct_split[int_split_grid_ids, ])
-        sf::st_as_sf(
-          sf_grid_size |>
-            dplyr::filter(
-              (X <= grid_unit[3] & X >= grid_unit[1]) &
-              (Y <= grid_unit[4] & Y >= grid_unit[2])
-            ),
-          coords = c("X", "Y"),
-          crs = 5179,
-          remove = FALSE
-        )
-      },
-      iteration = "list",
-      pattern = map(int_split_grid_ids),
-      description = "Split prediction grid into list by chopin grid",
-      resources = targets::tar_resources(
-        crew = targets::tar_resources_crew(controller = "controller_15")
-      )
-    )
+    ) # ,
+    # targets::tar_target(
+    #   list_pred_calc_grid_old,
+    #   command = {
+    #     grid_unit <- sf::st_bbox(sf_grid_correct_split[int_split_grid_ids, ])
+    #     sf::st_as_sf(
+    #       sf_grid_size |>
+    #         dplyr::filter(
+    #           (X <= grid_unit[3] & X >= grid_unit[1]) &
+    #           (Y <= grid_unit[4] & Y >= grid_unit[2])
+    #         ),
+    #       coords = c("X", "Y"),
+    #       crs = 5179,
+    #       remove = FALSE
+    #     )
+    #   },
+    #   iteration = "list",
+    #   pattern = map(int_split_grid_ids),
+    #   description = "Split prediction grid into list by chopin grid",
+    #   resources = targets::tar_resources(
+    #     crew = targets::tar_resources_crew(controller = "controller_15")
+    #   )
+    # )
   )
 
 
@@ -664,7 +697,7 @@ list_process_feature <-
         sf::st_read(chr_file_emission_locs, quiet = TRUE) |>
           sf::st_transform(5179) |>
           dplyr::filter(
-            영업상태구분코드 ==  "01"
+            영업상태구분코드 == "01"
           )
       }
     ),
@@ -690,7 +723,7 @@ list_process_feature <-
           ) |>
           sf::st_transform(5179) |>
           dplyr::filter(
-            영업상태구분코드 ==  "01"
+            영업상태구분코드 == "01"
           ) |>
           dplyr::mutate(
             class_weight = as.integer(sub("종", "", 종별명)),
@@ -902,7 +935,7 @@ list_process_feature <-
       iteration = "vector"
     ),
     targets::tar_target(
-      name = df_feat_correct_year_aod,
+      name = df_feat_correct_aod_yearly,
       command = {
         aod_ras <- terra::rast(rast_year_aod)
         crs_ras <- terra::crs(aod_ras)
@@ -925,7 +958,7 @@ list_process_feature <-
             TMSID = TMSID,
             TMSID2 = TMSID2,
             year = year,
-            aod = ifelse(is.nan(mean), 0L, mean)
+            aod_yearly = ifelse(is.nan(mean), 0L, mean)
           )
         extracted
       },
@@ -945,6 +978,10 @@ list_process_feature <-
             full.names = TRUE,
             recursive = TRUE
           )
+        if (length(chr_file_chelsa) == 0) {
+          warning("No CHELSA files found for year ", int_year_chelsa)
+          return(data.frame())
+        }
 
         chelsa_ras <- terra::rast(chr_file_chelsa)
         layer_unique <- unique(terra::varnames(chelsa_ras))
@@ -1023,9 +1060,8 @@ list_process_feature <-
       iteration = "vector"
     ),
     targets::tar_target(
-      name = df_feat_correct_blh,
+      name = df_feat_correct_blh_yearly,
       command = {
-
         blh_ras <- terra::rast(rast_era5_blh)
         crs_ras <- terra::crs(blh_ras)
         year_i <- int_aod_year_chunks
@@ -1048,10 +1084,9 @@ list_process_feature <-
             TMSID = TMSID,
             TMSID2 = TMSID2,
             year = year,
-            blh = ifelse(is.nan(mean), 0L, mean)
+            blh_yearly = ifelse(is.nan(mean), 0L, mean)
           )
         extracted
-
       },
       pattern = map(sf_monitors_correct_yr, int_aod_year_chunks, rast_era5_blh)
     ),
@@ -1070,8 +1105,8 @@ list_process_feature <-
               df_feat_correct_landuse_agg,
               df_feat_correct_mtpi,
               df_feat_correct_mtpi_1km,
-              df_feat_correct_year_aod,
-              df_feat_correct_blh
+              df_feat_correct_aod_yearly,
+              df_feat_correct_blh_yearly
             ),
             .f = collapse::join,
             on = c("TMSID", "TMSID2", "year")
@@ -1084,7 +1119,7 @@ list_process_feature <-
             d_road = as.numeric(d_road) / 1000,
             dsm = as.numeric(dsm),
             dem = as.numeric(dem),
-            mtpi = as.numeric(mtpi)#,
+            mtpi = as.numeric(mtpi) # ,
             # building_density = as.numeric(building_density),
             # wind_speed_10m = as.numeric(wind_speed_10m),
             # wind_dir_deg = as.numeric(wind_dir_deg),
@@ -1096,9 +1131,9 @@ list_process_feature <-
           ) %>%
           sf::st_drop_geometry()
         names(df_res) <- sub("mean.", "", names(df_res))
-        df_res <- df_res %>% 
+        df_res <- df_res %>%
           dplyr::relocate(
-            any_of(c("year", "ndays", "PM10", "PM25")), 
+            any_of(c("year", "ndays", "PM10", "PM25")),
             .after = TMSID2
           )
         df_res
@@ -1112,76 +1147,25 @@ list_process_feature <-
         df_feat_correct_landuse_agg,
         df_feat_correct_mtpi,
         df_feat_correct_mtpi_1km,
-        df_feat_correct_year_aod,
-        df_feat_correct_blh
+        df_feat_correct_aod_yearly,
+        df_feat_correct_blh_yearly
       )
     ),
     targets::tar_target(
       name = df_feat_correct_merged_old,
       command = {
-        df_res <-
-          purrr::reduce(
-            .x =
-            list(
-              sf_monitors_correct_yr,
-              df_feat_correct_d_road
-            ),
-            .f = collapse::join,
-            on = c("TMSID", "TMSID2", "year")
-          ) %>%
-          dplyr::bind_cols(
-            df_feat_correct_landuse
-          ) %>%
-          # dplyr::left_join(
-          #   df_feat_correct_building_density,
-          #   by = c("TMSID", "TMSID2", "year")
-          # ) %>%
-          dplyr::left_join(
-            {
-              purrr::reduce(
-              .x = df_feat_correct_year_aod,
-              .f = rbind
-              ) %>%
-              dplyr::rename(aod = mean)
-            },
-            by = c("TMSID", "TMSID2", "year")
-          ) %>%
-          # dplyr::left_join(
-          #   df_feat_correct_wind_annual,
-          #   by = c("TMSID", "TMSID2", "year")
-          # ) %>%
-          dplyr::mutate(
-            dsm = unlist(df_feat_correct_dsm),
-            dem = unlist(df_feat_correct_dem),
-            # n_emittors_watershed = unlist(df_feat_correct_emittors$n_emittors_watershed),
-            mtpi = unlist(df_feat_correct_mtpi),
-            mtpi_1km = unlist(df_feat_correct_mtpi_1km)
-          ) %>%
-          # 4. 단위 변환 및 데이터 타입 정제
-          dplyr::mutate(
-            d_road = as.numeric(d_road) / 1000,           # m 단위를 km로 변환
-            dsm = as.numeric(dsm),
-            dem = as.numeric(dem),
-            mtpi = as.numeric(mtpi)#,
-            # building_density = as.numeric(building_density),
-            # wind_speed_10m = as.numeric(wind_speed_10m),
-            # wind_dir_deg = as.numeric(wind_dir_deg),
-            # n_emittors_watershed =
-            #   ifelse(
-            #     is.na(n_emittors_watershed), 0,
-            #     as.numeric(n_emittors_watershed)
-            #   )
-          ) %>%
-          sf::st_drop_geometry()
-        names(df_res) <- sub("mean.", "", names(df_res))
-        df_res
+        df_feat_correct_merged
       }
     ),
     # Incorrect addresses
     targets::tar_target(
       name = df_feat_incorrect_d_road,
       command = {
-        road <- sf::st_read(chr_road_files, quiet = TRUE)
+        road <- purrr::map(chr_road_files, \(x) {
+          sf::st_read(x, quiet = TRUE) |>
+            sf::st_transform(5179)
+        }) |>
+          dplyr::bind_rows()
         road <- sf::st_transform(road, sf::st_crs(sf_monitors_incorrect))
         road <- road %>%
           dplyr::filter(!ROAD_TYPE %in% c("002", "004") & ROAD_USE == 0)
@@ -1277,97 +1261,90 @@ list_process_feature <-
       name = df_feat_incorrect_emittors,
       command = {
         result <- gw_emittors(
-            input = sf_monitors_incorrect,
-            target = sf_emission_locs,
-            clip = sf_korea_watershed,
-            wfun = "gaussian",
-            bw = 5000,
-            dist_method = "geodesic"
-          )
+          input = sf_monitors_incorrect,
+          target = sf_emission_locs,
+          clip = sf_korea_watershed,
+          wfun = "gaussian",
+          bw = 5000,
+          dist_method = "geodesic"
+        )
         result
       }
     ),
     targets::tar_target(
       name = df_feat_incorrect_merged,
       command = {
-        df_res <-
-          purrr::reduce(
-            .x =
-              list(
-                sf_monitors_incorrect,
-                df_feat_incorrect_d_road
-              ),
-            .f = collapse::join,
-            on = c("TMSID", "TMSID2", "year")
-          ) %>%
-          dplyr::bind_cols(
-            df_feat_incorrect_landuse
-          ) %>%
-          dplyr::left_join(
-            df_feat_incorrect_building_density,
-            by = c("TMSID", "TMSID2", "year")
-          ) %>%
-          # dplyr::left_join(
-          #   df_feat_incorrect_wind_annual,
-          #   by = c("TMSID", "TMSID2", "year")
-          # ) %>%
-          dplyr::mutate(
-            dsm = unlist(df_feat_incorrect_dsm),
-            dem = unlist(df_feat_incorrect_dem)
-          ) %>%
-          dplyr::mutate(
-            d_road = as.numeric(d_road) / 1000,
-            dsm = as.numeric(dsm),
-            dem = as.numeric(dem),
-            building_density = as.numeric(building_density),
-            wind_speed_10m = as.numeric(wind_speed_10m),
-            wind_dir_deg = as.numeric(wind_dir_deg),
-            n_emittors_watershed = unlist(df_feat_correct_emittors$n_emittors_watershed),
-            mtpi = unlist(df_feat_incorrect_mtpi),
-            mtpi_1km = unlist(df_feat_incorrect_mtpi_1km)
-          ) %>%
+        base <- sf_monitors_incorrect |>
           sf::st_drop_geometry()
+
+        landuse_names <- names(df_feat_incorrect_landuse[[1]])
+        landuse_by_row <- as.data.frame(
+          matrix(NA_real_, nrow = nrow(base), ncol = length(landuse_names))
+        )
+        names(landuse_by_row) <- landuse_names
+
+        for (i in seq_along(df_feat_incorrect_landuse)) {
+          idx <- base$year == int_years_spatial[[i]]
+          landuse_by_row[idx, ] <- df_feat_incorrect_landuse[[i]][idx, landuse_names, drop = FALSE]
+        }
+
+        df_res <-
+          base |>
+          dplyr::bind_cols(landuse_by_row) |>
+          dplyr::mutate(
+            d_road = as.numeric(df_feat_incorrect_d_road$d_road) / 1000,
+            dsm = as.numeric(df_feat_incorrect_dsm$mean),
+            dem = as.numeric(df_feat_incorrect_dem$mean),
+            building_density = as.numeric(df_feat_incorrect_building_density$building_density),
+            gw_emission = as.numeric(df_feat_incorrect_emittors$gw_emission),
+            mtpi = as.numeric(df_feat_incorrect_mtpi$mean),
+            mtpi_1km = as.numeric(df_feat_incorrect_mtpi_1km$mean)
+          )
         names(df_res) <- sub("mean.", "", names(df_res))
         df_res
       }
     ),
     # Grid point features
-   targets::tar_target(
-     name = df_feat_grid_d_road,
-     command = {
-       road <- sf::st_read(chr_road_files, quiet = TRUE)
-       road <- sf::st_transform(road, sf::st_crs(list_pred_calc_grid))
-       road <- road %>%
-         dplyr::filter(!ROAD_TYPE %in% c("002", "004") & ROAD_USE == 0)
-       nearest_idx <- sf::st_nearest_feature(
-         x = list_pred_calc_grid,
-         y = road
-       )
-       road_nearest <- road[nearest_idx, ]
-       dist_road_nearest <-
-         sf::st_distance(
-           x = list_pred_calc_grid,
-           y = road_nearest,
-           by_element = TRUE
-         )
-       
-       sf_grid_dist_att <-
-         list_pred_calc_grid |>
-         dplyr::mutate(
-           d_road = dist_road_nearest
-         ) |>
-         sf::st_drop_geometry()
-       
-       sf_grid_dist_att
-     },
-     iteration = "list",
-     
-     # Cross mapping
-     pattern = cross(list_pred_calc_grid, chr_road_files),
-     resources = targets::tar_resources(
-       crew = targets::tar_resources_crew(controller = "controller_20")
-     )
-   ),
+    targets::tar_target(
+      name = df_feat_grid_d_road,
+      command = {
+        road <- purrr::map(chr_road_files, \(x) {
+          sf::st_read(x, quiet = TRUE) |>
+            sf::st_transform(5179)
+        }) |>
+          dplyr::bind_rows()
+        road <- sf::st_transform(road, sf::st_crs(list_pred_calc_grid))
+        if (all(c("ROAD_TYPE", "ROAD_USE") %in% names(road))) {
+          road <- road %>%
+            dplyr::filter(!ROAD_TYPE %in% c("002", "004") & ROAD_USE == 0)
+        }
+        nearest_idx <- sf::st_nearest_feature(
+          x = list_pred_calc_grid,
+          y = road
+        )
+        road_nearest <- road[nearest_idx, ]
+        dist_road_nearest <-
+          sf::st_distance(
+            x = list_pred_calc_grid,
+            y = road_nearest,
+            by_element = TRUE
+          )
+
+        sf_grid_dist_att <-
+          list_pred_calc_grid |>
+          dplyr::mutate(
+            d_road = dist_road_nearest
+          ) |>
+          sf::st_drop_geometry()
+
+        sf_grid_dist_att
+      },
+      iteration = "list",
+      pattern = map(list_pred_calc_grid),
+      resources = targets::tar_resources(
+        crew = targets::tar_resources_crew(controller = "controller_20")
+      )
+    ),
     targets::tar_target(
       name = df_feat_grid_dsm,
       command = {
@@ -1403,64 +1380,133 @@ list_process_feature <-
     targets::tar_target(
       name = df_feat_grid_landuse,
       command = {
-        init_list <- list()
-        # another implementation: memory-minded
-        list_10k_split <-
-          list_pred_calc_grid |>
-          nrow() |>
-          seq_len()
-        list_10k_split <-
-          ceiling(list_10k_split / 5e4)
-        for (i in seq_len(max(list_10k_split))) {
-          list_pred_calc_grid_i <-
-            list_pred_calc_grid[list_10k_split == i, ]
-          if (nrow(list_pred_calc_grid_i) == 0) {
-            next
-          }
-
-          crs_ras <- "EPSG:4326"
-          crs_vec <- "EPSG:5179"
-          ext_reproj <-
-            terra::project(
-              terra::ext(list_pred_calc_grid_i) + 1000,
-              crs_vec, crs_ras
+        pid <- Sys.getpid()
+        bbox <- sf::st_bbox(list_pred_calc_grid)
+        bbox_text <- paste(names(bbox), as.numeric(bbox), sep = "=", collapse = ",")
+        bbox_file <- gsub("[^A-Za-z0-9_.-]+", "_", paste(as.numeric(bbox), collapse = "_"))
+        debug_log_dir <- file.path("daehoon", "outputs", "grid_landuse_debug_logs")
+        dir.create(debug_log_dir, recursive = TRUE, showWarnings = FALSE)
+        log_file <-
+          file.path(
+            debug_log_dir,
+            sprintf(
+              "df_feat_grid_landuse_pid%s_n%s_bbox%s_%s.log",
+              pid,
+              nrow(list_pred_calc_grid),
+              bbox_file,
+              format(Sys.time(), "%Y%m%d_%H%M%S")
             )
-
-          landuse_ras <-
-            terra::rast(
-              chr_landuse_freq_file,
-              win = ext_reproj
-            )
-          extracted_i <-
-            chopin::extract_at(
-              x = landuse_ras,
-              y = list_pred_calc_grid_i,
-              radius = 100,
-              func = "frac",
-              force_df = TRUE
-            )
-          init_list[[i]] <- extracted_i
-          rm(extracted_i)
+          )
+        log_event <- function(event, radius = NA_real_, extra = "") {
+          line <- paste(
+            format(Sys.time(), "%Y-%m-%d %H:%M:%OS3 %Z"),
+            paste0("pid=", pid),
+            paste0("nrow=", nrow(list_pred_calc_grid)),
+            paste0("bbox=", bbox_text),
+            paste0("radius=", ifelse(is.na(radius), "NA", radius)),
+            paste0("event=", event),
+            extra,
+            sep = " | "
+          )
+          cat(line, "\n", file = log_file, append = TRUE)
         }
 
-        collapse::rowbind(init_list, fill = TRUE)
+        branch_completed <- FALSE
+        on.exit({
+          if (!branch_completed) {
+            log_event("branch exit before successful end")
+          }
+        }, add = TRUE)
 
-        # old implementation
-        # landuse_ras <-
-        #   terra::rast(chr_landuse_files[length(chr_landuse_files)], win = c(124, 132.5, 33, 38.6))
+        log_event("branch start")
+        landuse_file <- tail(unlist(chr_landuse_files), 1)
+        if (length(landuse_file) != 1 || is.na(landuse_file) || !file.exists(landuse_file)) {
+          stop("Latest landuse raster is not available.")
+        }
 
-        # # landuse_freq <-
-        # #   terra::rast(file.path(chr_dir_data, "landuse_freq_glc_fcs30d_2022.tif"))
-        # chopin::extract_at(
-        #   x = landuse_ras,
-        #   y = list_pred_calc_grid,
-        #   radius = 100,
-        #   func = "frac",
-        #   force_df = TRUE
-        # )
+        radii <- as.numeric(unlist(int_landuse_radius))
+        if (length(radii) < 1L || anyNA(radii)) {
+          stop("df_feat_grid_landuse expects one or more landuse radii.")
+        }
+
+        log_event("terra::rast start")
+        landuse_ras_full <- terra::rast(landuse_file)
+        log_event("terra::rast end")
+
+        log_event("st_transform start")
+        grid_landuse_crs <-
+          list_pred_calc_grid |>
+          sf::st_transform(terra::crs(landuse_ras_full))
+        log_event("st_transform end")
+
+        log_event("crop start")
+        landuse_ras <-
+          terra::crop(
+            landuse_ras_full,
+            terra::ext(grid_landuse_crs) + 0.05
+          )
+        log_event("crop end")
+
+        landuse_classes <-
+          c(
+            0, 10, 11, 20, 51, 52, 61, 62, 71, 72, 81, 82,
+            91, 120, 130, 140, 150, 181, 182, 183, 186, 187,
+            190, 200, 210
+          )
+
+        extracted_by_radius <-
+          lapply(radii, function(radius_i) {
+            log_event("extract_at start", radius = radius_i)
+            extracted_i <-
+              chopin::extract_at(
+                x = landuse_ras,
+                y = grid_landuse_crs,
+                radius = radius_i,
+                func = "frac",
+                force_df = TRUE
+              )
+            log_event("extract_at end", radius = radius_i, extra = paste0("ncol=", ncol(extracted_i)))
+
+            frac_cols <- grep("^frac_", names(extracted_i), value = TRUE)
+            extracted_i <- extracted_i[, frac_cols, drop = FALSE]
+            names(extracted_i) <-
+              paste0(
+                "landuse_",
+                names(extracted_i),
+                "_",
+                radius_i
+              )
+            landuse_terms <-
+              paste0("landuse_frac_", landuse_classes, "_", radius_i)
+            missing_landuse_terms <- setdiff(landuse_terms, names(extracted_i))
+            for (term in missing_landuse_terms) {
+              extracted_i[[term]] <- 0
+            }
+            extracted_i[, landuse_terms, drop = FALSE]
+          })
+
+        grid_meta <-
+          list_pred_calc_grid |>
+          sf::st_drop_geometry() |>
+          dplyr::select(dplyr::any_of("gid"))
+        if (!"gid" %in% names(grid_meta)) {
+          grid_meta$.grid_row <- seq_len(nrow(grid_meta))
+        }
+
+        log_event("bind_cols start")
+        df_res <-
+          dplyr::bind_cols(
+            grid_meta,
+            do.call(dplyr::bind_cols, extracted_by_radius)
+          )
+        log_event("bind_cols end", extra = paste0("ncol=", ncol(df_res)))
+
+        log_event("branch end")
+        branch_completed <- TRUE
+        df_res
       },
       iteration = "list",
-      pattern = cross(list_pred_calc_grid, chr_landuse_files),
+      pattern = map(list_pred_calc_grid),
       resources = targets::tar_resources(
         crew = targets::tar_resources_crew(controller = "controller_20")
       )
@@ -1500,18 +1546,105 @@ list_process_feature <-
       )
     ),
     targets::tar_target(
+      name = df_feat_grid_aod_yearly,
+      command = {
+        year_i <- int_aod_year_chunks
+        aod_file <- rast_year_aod
+        if (length(aod_file) != 1 || is.na(aod_file) || !file.exists(aod_file)) {
+          stop("Yearly AOD raster is not available for year ", year_i)
+        }
+        aod_ras <- terra::rast(aod_file)
+        grid_pts <-
+          list_pred_calc_grid |>
+          sf::st_transform(terra::crs(aod_ras))
+
+        extracted <-
+          terra::extract(
+            x = aod_ras,
+            y = sf::st_coordinates(grid_pts)
+          )
+        value_col <- setdiff(names(extracted), "ID")[1]
+
+        list_pred_calc_grid |>
+          sf::st_drop_geometry() |>
+          dplyr::select(dplyr::any_of(c("gid", "x", "y", "layer"))) |>
+          dplyr::mutate(
+            year = as.integer(year_i),
+            aod_yearly = ifelse(is.nan(extracted[[value_col]]), 0L, extracted[[value_col]])
+          )
+      },
+      iteration = "list",
+      pattern = cross(
+        map(list_pred_calc_grid),
+        map(int_aod_year_chunks, rast_year_aod)
+      ),
+      resources = targets::tar_resources(
+        crew = targets::tar_resources_crew(controller = "controller_20")
+      )
+    ),
+    targets::tar_target(
+      name = df_feat_grid_blh_yearly,
+      command = {
+        year_i <- int_aod_year_chunks
+        blh_file <- rast_era5_blh
+        if (length(blh_file) != 1 || is.na(blh_file) || !file.exists(blh_file)) {
+          stop("Yearly BLH raster is not available for year ", year_i)
+        }
+        blh_ras <- terra::rast(blh_file)
+        grid_pts <-
+          list_pred_calc_grid |>
+          sf::st_transform(terra::crs(blh_ras))
+
+        extracted <-
+          terra::extract(
+            x = blh_ras,
+            y = sf::st_coordinates(grid_pts)
+          )
+        value_col <- setdiff(names(extracted), "ID")[1]
+
+        list_pred_calc_grid |>
+          sf::st_drop_geometry() |>
+          dplyr::select(dplyr::any_of(c("gid", "x", "y", "layer"))) |>
+          dplyr::mutate(
+            year = as.integer(year_i),
+            blh_yearly = ifelse(is.nan(extracted[[value_col]]), 0L, extracted[[value_col]])
+          )
+      },
+      iteration = "list",
+      pattern = cross(
+        map(list_pred_calc_grid),
+        map(int_aod_year_chunks, rast_era5_blh)
+      ),
+      resources = targets::tar_resources(
+        crew = targets::tar_resources_crew(controller = "controller_20")
+      )
+    ),
+    targets::tar_target(
       name = df_feat_grid_emittors,
       command = {
-        result <-
-          gw_emittors(
-            input = list_pred_calc_grid,
-            target = sf_emission_locs,
-            clip = sf_korea_watershed,
-            wfun = "gaussian",
-            bw = 5000,
-            dist_method = "geodesic"
+        if (!identical(Sys.getenv("COMPUTE_GRID_EMISSIONS"), "true")) {
+          warning("Skipping grid emissions; set COMPUTE_GRID_EMISSIONS=true to compute gw_emission.")
+          return(
+            list_pred_calc_grid |>
+              sf::st_drop_geometry() |>
+              dplyr::mutate(gw_emission = NA_real_)
           )
-        result
+        }
+        row_group <- ceiling(seq_len(nrow(list_pred_calc_grid)) / 1000)
+        purrr::map(
+          split(seq_len(nrow(list_pred_calc_grid)), row_group),
+          \(idx) {
+            gw_emittors(
+              input = list_pred_calc_grid[idx, ],
+              target = sf_emission_locs,
+              clip = sf_korea_watershed,
+              wfun = "gaussian",
+              bw = 5000,
+              dist_method = "geodesic"
+            )
+          }
+        ) |>
+          dplyr::bind_rows()
       },
       iteration = "list",
       pattern = map(list_pred_calc_grid),
@@ -1519,28 +1652,157 @@ list_process_feature <-
         crew = targets::tar_resources_crew(controller = "controller_08")
       )
     ),
-   targets::tar_target(
-     name = df_feat_grid_merged,
-     command = {
-       df_res <- df_feat_grid_d_road %>%
-         dplyr::bind_cols(df_feat_grid_landuse)
-       df_res %>%
-         dplyr::mutate(
-           dsm = as.numeric(df_feat_grid_dsm), 
-           dem = as.numeric(df_feat_grid_dem),
-           mtpi = as.numeric(df_feat_grid_mtpi),
-           n_emittors_watershed = as.numeric(df_feat_grid_emittors$n_emittors_watershed),
-           d_road = as.numeric(d_road) / 1000
-         )
-     },
-     iteration = "list",
-     pattern = map(
-       df_feat_grid_d_road,
-       df_feat_grid_landuse
-     )
-   )
-)
+    targets::tar_target(
+      name = df_feat_grid_merged_static,
+      command = {
+        n_grid <- nrow(df_feat_grid_d_road)
+        feature_nrows <- c(
+          dem = nrow(df_feat_grid_dem),
+          dsm = nrow(df_feat_grid_dsm),
+          emittors = nrow(df_feat_grid_emittors),
+          landuse = nrow(df_feat_grid_landuse),
+          mtpi = nrow(df_feat_grid_mtpi),
+          mtpi_1km = nrow(df_feat_grid_mtpi_1km)
+        )
+        if (any(feature_nrows != n_grid)) {
+          stop(
+            "Static grid feature row counts are not aligned: ",
+            paste(names(feature_nrows), feature_nrows, sep = "=", collapse = ", ")
+          )
+        }
 
+        get_numeric_feature <- function(x, feature_name) {
+          if ("mean" %in% names(x)) {
+            return(as.numeric(x$mean))
+          }
+          if (feature_name %in% names(x)) {
+            return(as.numeric(x[[feature_name]]))
+          }
+          if (ncol(x) == 1L) {
+            return(as.numeric(x[[1L]]))
+          }
+          stop("Could not identify numeric feature column for ", feature_name)
+        }
+
+        if (all(c("gid") %in% names(df_feat_grid_d_road)) &&
+          all(c("gid") %in% names(df_feat_grid_landuse))) {
+          if (anyDuplicated(df_feat_grid_d_road$gid) || anyDuplicated(df_feat_grid_landuse$gid)) {
+            stop("gid must be unique before merging grid landuse features.")
+          }
+          landuse_idx <- match(df_feat_grid_d_road$gid, df_feat_grid_landuse$gid)
+          if (anyNA(landuse_idx)) {
+            stop("df_feat_grid_landuse is missing gid values from df_feat_grid_d_road.")
+          }
+          landuse_aligned <- df_feat_grid_landuse[landuse_idx, , drop = FALSE]
+          landuse_cols <- setdiff(names(landuse_aligned), c("gid", ".grid_row"))
+          df_res <-
+            df_feat_grid_d_road %>%
+            dplyr::bind_cols(landuse_aligned[, landuse_cols, drop = FALSE])
+        } else {
+          df_res <-
+            df_feat_grid_d_road %>%
+            dplyr::bind_cols(df_feat_grid_landuse)
+        }
+        df_res <-
+          df_res %>%
+          dplyr::mutate(
+            dsm = get_numeric_feature(df_feat_grid_dsm, "dsm"),
+            dem = get_numeric_feature(df_feat_grid_dem, "dem"),
+            mtpi = get_numeric_feature(df_feat_grid_mtpi, "mtpi"),
+            mtpi_1km = get_numeric_feature(df_feat_grid_mtpi_1km, "mtpi_1km"),
+            gw_emission = as.numeric(df_feat_grid_emittors$gw_emission),
+            d_road = as.numeric(d_road) / 1000
+          )
+
+        metadata_cols <-
+          intersect(
+            c("gid", ".grid_row", "x", "y", "layer", "X", "Y", "longitude", "latitude", "lon", "lat"),
+            names(df_res)
+          )
+        feature_cols <- setdiff(names(df_res), metadata_cols)
+        df_res |>
+          dplyr::select(dplyr::all_of(metadata_cols), dplyr::all_of(feature_cols))
+      },
+      iteration = "list",
+      pattern = map(
+        df_feat_grid_d_road,
+        df_feat_grid_dem,
+        df_feat_grid_dsm,
+        df_feat_grid_emittors,
+        df_feat_grid_landuse,
+        df_feat_grid_mtpi,
+        df_feat_grid_mtpi_1km
+      )
+    ),
+    targets::tar_target(
+      name = df_feat_grid_merged,
+      command = {
+        year_i <- int_aod_year_chunks
+        if (length(rast_year_aod) != 1 || is.na(rast_year_aod) || !file.exists(rast_year_aod)) {
+          stop("Yearly AOD raster is not available for year ", year_i)
+        }
+        if (length(rast_era5_blh) != 1 || is.na(rast_era5_blh) || !file.exists(rast_era5_blh)) {
+          stop("Yearly BLH raster is not available for year ", year_i)
+        }
+
+        coord_cols <- if (all(c("x", "y") %in% names(df_feat_grid_merged_static))) {
+          c("x", "y")
+        } else if (all(c("X", "Y") %in% names(df_feat_grid_merged_static))) {
+          c("X", "Y")
+        } else {
+          stop("df_feat_grid_merged_static must contain x/y or X/Y coordinate columns.")
+        }
+
+        aod_ras <- terra::rast(rast_year_aod)
+        blh_ras <- terra::rast(rast_era5_blh)
+        grid_pts <-
+          sf::st_as_sf(
+            df_feat_grid_merged_static,
+            coords = coord_cols,
+            crs = 5179,
+            remove = FALSE
+          )
+
+        grid_aod <- sf::st_transform(grid_pts, terra::crs(aod_ras))
+        aod_extracted <-
+          terra::extract(
+            x = aod_ras,
+            y = sf::st_coordinates(grid_aod)
+          )
+        aod_col <- setdiff(names(aod_extracted), "ID")[1]
+
+        grid_blh <- sf::st_transform(grid_pts, terra::crs(blh_ras))
+        blh_extracted <-
+          terra::extract(
+            x = blh_ras,
+            y = sf::st_coordinates(grid_blh)
+          )
+        blh_col <- setdiff(names(blh_extracted), "ID")[1]
+
+        df_res <-
+          df_feat_grid_merged_static |>
+          dplyr::mutate(
+            year = as.integer(year_i),
+            aod_yearly = ifelse(is.nan(aod_extracted[[aod_col]]), 0L, aod_extracted[[aod_col]]),
+            blh_yearly = ifelse(is.nan(blh_extracted[[blh_col]]), 0L, blh_extracted[[blh_col]])
+          )
+
+        metadata_cols <-
+          intersect(
+            c("gid", "x", "y", "layer", "year", "X", "Y", "longitude", "latitude", "lon", "lat"),
+            names(df_res)
+          )
+        feature_cols <- setdiff(names(df_res), metadata_cols)
+        df_res |>
+          dplyr::select(dplyr::all_of(metadata_cols), dplyr::all_of(feature_cols))
+      },
+      iteration = "list",
+      pattern = cross(
+        map(df_feat_grid_merged_static),
+        map(int_aod_year_chunks, rast_year_aod, rast_era5_blh)
+      )
+    )
+  )
 
 
 # ----------------------------------------------------------------
@@ -1567,3 +1829,7 @@ list_process_feature <-
 #### (2) 대기질 농도에서 음수값(-999로 기록됨)은 결측치 처리
 
 ### df_feat_correct_merged 수정: landuse 변경사항에 맞게 수정
+
+
+## 2026.06.03
+### list_pred_calc_grid_old 주석처리 (tar_make 과정에서 오류 일으킴)

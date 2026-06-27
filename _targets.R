@@ -34,7 +34,7 @@ targets::tar_option_set(
       "data.table", "tibble", "tune", "yardstick", "workflows",
       "recipes", "dials", "lubridate", "rgee",
       "chopin", "mirai", "parsnip", "finetune", "huimori", "nanoparquet",
-      "readxl", "bonsai", "lightgbm", "xgboost", "crew", "fastshap"),
+      "readxl", "bonsai", "lightgbm", "xgboost", "crew", "fastshap", "reticulate"),
   format = "qs", # Optionally set the default storage format. qs is fast.
   controller = crew::crew_controller_group(
     controller_08,
@@ -53,6 +53,7 @@ targets::tar_option_set(
 )
 
 # Run the R scripts in the R/ folder with your custom functions:
+targets::tar_source("R")
 targets::tar_source("inst/targets/1_init_targets.R")
 targets::tar_source("inst/targets/2_pin_files.R")
 targets::tar_source("inst/targets/3_process_feature.R")         

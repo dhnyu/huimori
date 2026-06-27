@@ -973,9 +973,9 @@ fit_tidy_xgb <-
 
     xgb_rec <-
       recipe(formula, data = data) |>
-      recipes::step_zv(all_predictors()) |>
+      recipes::step_zv(recipes::all_predictors()) |>
       # step_pca(starts_with("class_"), num_comp = 3) |>
-      step_normalize(all_predictors())
+      recipes::step_normalize(recipes::all_predictors())
 
     xgb_wf <-
       workflow() |>
@@ -984,12 +984,12 @@ fit_tidy_xgb <-
 
     tuneset <-
       hardhat::extract_parameter_set_dials(xgb_wf) |>
-      dials::grid_space_filling(
-        min_n(c(3, 31)),
-        tree_depth(c(3, 10)),
-        learn_rate(range = c(-4, -1), trans = transform_log10()),
-        size = 100
-      )
+      update(
+        min_n = min_n(c(3, 31)),
+        tree_depth = tree_depth(c(3, 10)),
+        learn_rate = learn_rate(range = c(-4, -1), trans = transform_log10())
+      ) |>
+      dials::grid_space_filling(size = 100)
 
     mset <- yardstick::metric_set(
           yardstick::rmse, yardstick::mae)
@@ -1003,8 +1003,7 @@ fit_tidy_xgb <-
 
     if (is.null(strata)) {
       stratified <- rsample::vfold_cv(data = data, v = 5)
-    }
-    if (strata == "spatial") {
+    } else if (identical(strata, "spatial")) {
       stratified <- spatialsample::spatial_block_cv(data = data, method = "snake", v = 5)
     } else if (is.character(strata)) {
       stratified <- rsample::group_vfold_cv(data = data, group = strata, v = NULL)
@@ -1023,11 +1022,11 @@ fit_tidy_xgb <-
         stratified <- rsample::vfold_cv(data = data, v = 5)
         wf_tune <-
           xgb_wf |>
-          finetune::tune_race_anova(
+          tune::tune_grid(
             resamples = stratified,
             grid = tuneset,
             metrics = mset,
-            control = topt
+            control = tune::control_grid(save_pred = TRUE, save_workflow = TRUE)
           )
         attr(wf_tune, "error") <- e
         wf_tune
@@ -1086,9 +1085,9 @@ fit_tidy_lgb <-
 
     lgb_rec <-
       recipe(formula, data = data) |>
-      recipes::step_zv(all_predictors()) |>
+      recipes::step_zv(recipes::all_predictors()) |>
       # step_pca(starts_with("class_"), num_comp = 3) |>
-      step_normalize(all_predictors())
+      recipes::step_normalize(recipes::all_predictors())
 
     lgb_wf <-
       workflow() |>
@@ -1097,12 +1096,12 @@ fit_tidy_lgb <-
 
     tuneset <-
       hardhat::extract_parameter_set_dials(lgb_wf) |>
-      dials::grid_space_filling(
-        min_n(c(3, 10)),
-        tree_depth(c(3, 10)),
-        learn_rate(range = c(-4, -1), trans = transform_log10()),
-        size = 50
-      )
+      update(
+        min_n = min_n(c(3, 10)),
+        tree_depth = tree_depth(c(3, 10)),
+        learn_rate = learn_rate(range = c(-4, -1), trans = transform_log10())
+      ) |>
+      dials::grid_space_filling(size = 50)
 
     mset <- yardstick::metric_set(
           yardstick::rmse, yardstick::mae)
@@ -1116,22 +1115,34 @@ fit_tidy_lgb <-
 
     if (is.null(strata)) {
       stratified <- rsample::vfold_cv(data = data, v = 5)
-    }
-    if (is.character(strata)) {
-      stratified <- rsample::group_vfold_cv(data = data, group = strata, v = NULL)
-    }
-    if (strata == "spatial") {
+    } else if (identical(strata, "spatial")) {
       stratified <- spatialsample::spatial_block_cv(data = data, method = "snake", v = 5)
+    } else if (is.character(strata)) {
+      stratified <- rsample::group_vfold_cv(data = data, group = strata, v = NULL)
     }
 
     lgb_res <-
-      lgb_wf |>
-      finetune::tune_race_anova(
-        resamples = stratified,
-        grid = tuneset,
-        metrics = mset,
-        control = topt
-      )
+      tryCatch({
+        lgb_wf |>
+          finetune::tune_race_anova(
+            resamples = stratified,
+            grid = tuneset,
+            metrics = mset,
+            control = topt
+          )
+      }, error = function(e) {
+        stratified <- rsample::vfold_cv(data = data, v = 5)
+        wf_tune <-
+          lgb_wf |>
+          tune::tune_grid(
+            resamples = stratified,
+            grid = tuneset,
+            metrics = mset,
+            control = tune::control_grid(save_pred = TRUE, save_workflow = TRUE)
+          )
+        attr(wf_tune, "error") <- e
+        wf_tune
+      })
 
     return(lgb_res)
   }

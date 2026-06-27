@@ -467,7 +467,8 @@ list_process_feature_daily <-
               TMSID, TMSID2, year,
               d_road, dem, dsm, gw_emission, 
               starts_with("landuse_"), 
-              mtpi, mtpi_1km
+              mtpi, mtpi_1km,
+              aod_yearly, blh_yearly
             )
           
           res_daily <- res_daily %>% 

@@ -520,6 +520,108 @@ list_process_split <-
 
 
 ## Annualized feature calculation ####
+extract_landuse_fraction_debug <-
+  function(
+    x = NULL,
+    y = NULL,
+    id = NULL,
+    func = "frac",
+    extent = NULL,
+    radius = NULL,
+    out_class = "sf",
+    kernel = NULL,
+    kernel_func = stats::weighted.mean,
+    bandwidth = NULL,
+    max_cells = 3e+07,
+    .standalone = TRUE,
+    log_event = function(event, radius = NA_real_, extra = "") NULL
+  ) {
+    check_raster <- getFromNamespace(".check_raster", "chopin")
+    check_vector <- getFromNamespace(".check_vector", "chopin")
+    reproject_to_raster <- getFromNamespace("reproject_to_raster", "chopin")
+    dep_check <- getFromNamespace("dep_check", "chopin")
+    dep_switch <- getFromNamespace("dep_switch", "chopin")
+    kernel_weighting <- getFromNamespace(".kernel_weighting", "chopin")
+
+    log_event(".check_raster start", radius = radius)
+    x <- check_raster(x, extent = extent)
+    log_event(".check_raster end", radius = radius)
+
+    if (.standalone) {
+      log_event(".check_vector start", radius = radius)
+      y <- check_vector(
+        y,
+        extent = extent,
+        out_class = out_class,
+        subject_id = id
+      )
+      log_event(".check_vector end", radius = radius)
+
+      log_event("reproject_to_raster start", radius = radius)
+      y <- reproject_to_raster(vector = y, raster = x)
+      log_event("reproject_to_raster end", radius = radius)
+
+      if (dep_check(y) == "terra") {
+        y <- dep_switch(y)
+      }
+    }
+
+    if (!is.null(radius)) {
+      ygeom <- tolower(as.character(sf::st_geometry_type(y)))
+      if (!all(grepl("point", ygeom))) {
+        cli::cli_warn("Buffer is set with non-point geometries.")
+      }
+      log_event("st_buffer start", radius = radius)
+      y <- sf::st_buffer(y, radius, nQuadSegs = 90L)
+      log_event("st_buffer end", radius = radius)
+    }
+
+    iskernel <- !is.null(kernel)
+    log_event("exactextractr::exact_extract start", radius = radius)
+    exact_extract_args <- list(
+      x = x,
+      y = y,
+      fun = if (iskernel) NULL else func,
+      force_df = TRUE,
+      stack_apply = !iskernel,
+      append_cols = if (iskernel) NULL else id,
+      include_cols = if (iskernel) id else NULL,
+      progress = FALSE,
+      include_area = iskernel,
+      include_xy = iskernel
+    )
+    if (!is.null(max_cells)) {
+      exact_extract_args$max_cells_in_memory <- max_cells
+    }
+    extracted <- do.call(exactextractr::exact_extract, exact_extract_args)
+    log_event(
+      "exactextractr::exact_extract end",
+      radius = radius,
+      extra = paste0("nrow=", nrow(extracted), " ncol=", ncol(extracted))
+    )
+
+    if (iskernel) {
+      stopifnot(!is.null(bandwidth))
+      cli::cli_inform(sprintf(
+        "Kernel function [ %s ] is applied to calculate weights...",
+        kernel
+      ))
+      extracted <- kernel_weighting(
+        x_ras = x,
+        y_vec = y,
+        id = id,
+        extracted = extracted,
+        kernel = kernel,
+        kernel_func = kernel_func,
+        bandwidth = bandwidth
+      )
+    }
+
+    log_event("return start", radius = radius)
+    log_event("return end", radius = radius)
+    return(extracted)
+  }
+
 list_process_feature <-
   list(
     ### F01. Distance to the nearest road ####
@@ -1458,15 +1560,16 @@ list_process_feature <-
           lapply(radii, function(radius_i) {
             log_event("extract_at start", radius = radius_i)
             extracted_i <-
-              chopin::extract_at(
+              extract_landuse_fraction_debug(
                 x = landuse_ras,
                 y = grid_landuse_crs,
                 radius = radius_i,
                 func = "frac",
-                force_df = TRUE
+                log_event = log_event
               )
             log_event("extract_at end", radius = radius_i, extra = paste0("ncol=", ncol(extracted_i)))
 
+            log_event("column rename start", radius = radius_i)
             frac_cols <- grep("^frac_", names(extracted_i), value = TRUE)
             extracted_i <- extracted_i[, frac_cols, drop = FALSE]
             names(extracted_i) <-
@@ -1476,6 +1579,7 @@ list_process_feature <-
                 "_",
                 radius_i
               )
+            log_event("column rename end", radius = radius_i, extra = paste0("ncol=", ncol(extracted_i)))
             landuse_terms <-
               paste0("landuse_frac_", landuse_classes, "_", radius_i)
             missing_landuse_terms <- setdiff(landuse_terms, names(extracted_i))

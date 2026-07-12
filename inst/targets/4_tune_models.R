@@ -5,22 +5,14 @@ list_fit_models <-
     targets::tar_target(
       name = chr_terms_x,
       command = {
-        pat <- paste(
-        c(
-          "dsm", "dem", "d_road", "mtpi", "gw_emission",
-          "blh",
-          sprintf(
-            "landuse_frac_%d",
-            c(10, 11, 20, 51, 52, 61, 62, 71, 72,
-              82, 91, 130, 150, 181, 182, 183, 186, 187,
-              190, 200, 210
-            )
-          ),
-          "aod"
-        ),
-        collapse = "|"
-        )
-        grep(pat, names(df_feat_correct_merged), value = TRUE)
+        terms_expected <-
+          c(
+            "dsm", "dem", "d_road", "mtpi", "mtpi_1km",
+            landuse_fixed_terms(int_landuse_radius),
+            yearly_buffer_mean_terms("aod_yearly", int_landuse_radius),
+            yearly_buffer_mean_terms("blh_yearly", int_landuse_radius)
+          )
+        intersect(terms_expected, names(df_feat_correct_merged))
       }
     )
     ,

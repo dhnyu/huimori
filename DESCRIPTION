@@ -26,6 +26,9 @@ Imports:
     xgboost,
     lightgbm,
     spatialsample,
+    leaflet,
+    htmlwidgets,
+    raster,
     Rcpp,
     rgee
 Suggests:

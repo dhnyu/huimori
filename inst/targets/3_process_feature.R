@@ -1141,6 +1141,67 @@ extract_fixed_landuse_fractions <- function(
   df_res
 }
 
+merged_feature_predictor_terms <- function(radii) {
+  c(
+    "dsm", "dem", "d_road", "mtpi", "mtpi_1km",
+    landuse_fixed_terms(radii),
+    yearly_buffer_mean_terms("aod_yearly", radii),
+    yearly_buffer_mean_terms("blh_yearly", radii)
+  )
+}
+
+assert_required_columns <- function(df, cols, label) {
+  missing_cols <- setdiff(cols, names(df))
+  if (length(missing_cols) > 0L) {
+    stop(
+      label, " is missing required columns: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  invisible(df)
+}
+
+assert_unique_key <- function(df, key, label) {
+  assert_required_columns(df, key, label)
+  df_key <- if (inherits(df, "sf")) {
+    sf::st_drop_geometry(df)
+  } else {
+    df
+  }
+  df_key <- df_key[, key, drop = FALSE]
+  duplicate_idx <- anyDuplicated(df_key)
+  if (duplicate_idx > 0L) {
+    stop(
+      label, " has duplicated key rows for ",
+      paste(key, collapse = ", "), ". First duplicate row: ", duplicate_idx
+    )
+  }
+  invisible(df)
+}
+
+assert_single_year <- function(df, label) {
+  assert_required_columns(df, "year", label)
+  year_i <- unique(as.integer(df$year))
+  if (length(year_i) != 1L || is.na(year_i)) {
+    stop(label, " branch must contain exactly one year.")
+  }
+  year_i
+}
+
+write_correct_merged_parquet <- function(
+  df,
+  root_dir = file.path("daehoon", "outputs", "df_feat_correct_merged")
+) {
+  year_i <- assert_single_year(df, "df_feat_correct_merged")
+  out_dir <- file.path(root_dir, paste0("year=", year_i))
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  arrow::write_parquet(
+    x = df,
+    sink = file.path(out_dir, "part.parquet")
+  )
+  invisible(file.path(out_dir, "part.parquet"))
+}
+
 list_process_feature <-
   list(
     ### F01. Distance to the nearest road ####
@@ -1654,48 +1715,64 @@ list_process_feature <-
     targets::tar_target(
       name = df_feat_correct_merged,
       command = {
+        key_cols <- c("TMSID", "TMSID2", "year")
+        feature_inputs <-
+          list(
+            sf_monitors_correct_yr = sf_monitors_correct_yr,
+            df_feat_correct_d_road = df_feat_correct_d_road,
+            df_feat_correct_dem = df_feat_correct_dem,
+            df_feat_correct_dsm = df_feat_correct_dsm,
+            df_feat_correct_mtpi = df_feat_correct_mtpi,
+            df_feat_correct_mtpi_1km = df_feat_correct_mtpi_1km,
+            df_feat_correct_landuse = df_feat_correct_landuse,
+            df_feat_correct_aod_yearly = df_feat_correct_aod_yearly,
+            df_feat_correct_blh_yearly = df_feat_correct_blh_yearly
+          )
+        for (input_name in names(feature_inputs)) {
+          assert_unique_key(feature_inputs[[input_name]], key_cols, input_name)
+        }
+        base_n <- nrow(sf_monitors_correct_yr)
+
         df_res <-
           purrr::reduce(
-            list(
-              sf_monitors_correct_yr,
-              df_feat_correct_d_road,
-              df_feat_correct_dem,
-              df_feat_correct_dsm,
-              df_feat_correct_emittors,
-              df_feat_correct_landuse,
-              df_feat_correct_mtpi,
-              df_feat_correct_mtpi_1km,
-              df_feat_correct_aod_yearly,
-              df_feat_correct_blh_yearly
-            ),
+            feature_inputs,
             .f = collapse::join,
-            on = c("TMSID", "TMSID2", "year")
+            on = key_cols
           ) %>%
-          # dplyr::left_join(
-          #   df_feat_correct_wind_annual,
-          #   by = c("TMSID", "TMSID2", "year")
-          # ) %>%
           dplyr::mutate(
-            d_road = as.numeric(d_road) / 1000,
+            d_road = as.numeric(d_road),
             dsm = as.numeric(dsm),
             dem = as.numeric(dem),
-            mtpi = as.numeric(mtpi) # ,
-            # building_density = as.numeric(building_density),
-            # wind_speed_10m = as.numeric(wind_speed_10m),
-            # wind_dir_deg = as.numeric(wind_dir_deg),
-            # n_emittors_watershed =
-            #   ifelse(
-            #     is.na(n_emittors_watershed), 0,
-            #     as.numeric(n_emittors_watershed)
-            #   )
+            mtpi = as.numeric(mtpi),
+            mtpi_1km = as.numeric(mtpi_1km)
           ) %>%
           sf::st_drop_geometry()
+        if (nrow(df_res) != base_n) {
+          stop(
+            "df_feat_correct_merged row count changed after merge: base=",
+            base_n, ", merged=", nrow(df_res)
+          )
+        }
         names(df_res) <- sub("mean.", "", names(df_res))
         df_res <- df_res %>%
           dplyr::relocate(
             any_of(c("year", "ndays", "PM10", "PM25")),
             .after = TMSID2
           )
+        assert_unique_key(df_res, key_cols, "df_feat_correct_merged")
+        assert_required_columns(
+          df_res,
+          merged_feature_predictor_terms(int_landuse_radius),
+          "df_feat_correct_merged"
+        )
+        emitter_cols <- grep("emitt|emission|gw_emission", names(df_res), value = TRUE)
+        if (length(emitter_cols) > 0L) {
+          stop(
+            "df_feat_correct_merged contains emitter columns after emitters removal: ",
+            paste(emitter_cols, collapse = ", ")
+          )
+        }
+        write_correct_merged_parquet(df_res)
         df_res
       },
       pattern = map(
@@ -1703,7 +1780,6 @@ list_process_feature <-
         df_feat_correct_d_road,
         df_feat_correct_dem,
         df_feat_correct_dsm,
-        df_feat_correct_emittors,
         df_feat_correct_landuse,
         df_feat_correct_mtpi,
         df_feat_correct_mtpi_1km,
@@ -2022,6 +2098,100 @@ list_process_feature <-
       )
     ),
     targets::tar_target(
+      name = df_feat_grid_static_topo_yearly,
+      command = {
+        align_static_grid_feature <- function(base, feature, feature_col, feature_name) {
+          required_cols <- c("gid", "x", "y", "layer", feature_col)
+          assert_required_columns(base, c("gid", "x", "y", "layer"), "df_feat_grid_dem")
+          assert_required_columns(feature, required_cols, feature_name)
+          if (anyDuplicated(base["gid"]) || anyDuplicated(feature["gid"])) {
+            stop("gid must be unique before merging ", feature_name, ".")
+          }
+          idx <- match(base$gid, feature$gid)
+          if (anyNA(idx)) {
+            stop(feature_name, " feature is missing gid rows from df_feat_grid_dem.")
+          }
+          aligned <- feature[idx, , drop = FALSE]
+          for (coord_col in c("x", "y", "layer")) {
+            if (!identical(as.vector(base[[coord_col]]), as.vector(aligned[[coord_col]]))) {
+              stop(feature_name, " feature ", coord_col, " values are not aligned.")
+            }
+          }
+          aligned[, feature_col, drop = FALSE] |>
+            dplyr::mutate(dplyr::across(dplyr::all_of(feature_col), as.numeric))
+        }
+
+        n_grid <- nrow(df_feat_grid_dem)
+        feature_nrows <- c(
+          dsm = nrow(df_feat_grid_dsm),
+          mtpi = nrow(df_feat_grid_mtpi),
+          mtpi_1km = nrow(df_feat_grid_mtpi_1km)
+        )
+        if (any(feature_nrows != n_grid)) {
+          stop(
+            "Static grid feature row counts are not aligned: ",
+            paste(names(feature_nrows), feature_nrows, sep = "=", collapse = ", ")
+          )
+        }
+
+        df_res <-
+          df_feat_grid_dem |>
+          dplyr::select(gid, x, y, layer, dem) |>
+          dplyr::mutate(dem = as.numeric(dem)) |>
+          dplyr::bind_cols(
+            align_static_grid_feature(
+              df_feat_grid_dem,
+              df_feat_grid_dsm,
+              "dsm",
+              "df_feat_grid_dsm"
+            ),
+            align_static_grid_feature(
+              df_feat_grid_dem,
+              df_feat_grid_mtpi,
+              "mtpi",
+              "df_feat_grid_mtpi"
+            ),
+            align_static_grid_feature(
+              df_feat_grid_dem,
+              df_feat_grid_mtpi_1km,
+              "mtpi_1km",
+              "df_feat_grid_mtpi_1km"
+            )
+          ) |>
+          dplyr::mutate(year = as.integer(int_aod_year_chunks))
+
+        assert_required_columns(
+          df_res,
+          c("gid", "x", "y", "layer", "year", "dsm", "dem", "mtpi", "mtpi_1km"),
+          "df_feat_grid_static_topo_yearly"
+        )
+        if (nrow(df_res) != n_grid) {
+          stop(
+            "df_feat_grid_static_topo_yearly row count changed after merge: base=",
+            n_grid, ", merged=", nrow(df_res)
+          )
+        }
+        if (anyDuplicated(df_res[c("gid", "year")])) {
+          stop("df_feat_grid_static_topo_yearly must be unique by gid/year.")
+        }
+
+        df_res
+      },
+      iteration = "list",
+      pattern = cross(
+        map(
+          df_feat_grid_dem,
+          df_feat_grid_dsm,
+          df_feat_grid_mtpi,
+          df_feat_grid_mtpi_1km
+        ),
+        map(int_aod_year_chunks)
+      ),
+      resources = targets::tar_resources(
+        crew = targets::tar_resources_crew(controller = "controller_20")
+      )
+    ),
+    targets::tar_target(
       name = df_feat_grid_aod_yearly,
       command = {
         grid_use <-
@@ -2120,15 +2290,13 @@ list_process_feature <-
         if (length(year_i) != 1L || is.na(year_i)) {
           stop("df_feat_grid_d_road must contain exactly one feature year.")
         }
-
-        select_static_grid_branch_by_index <- function(feature_list, idx, feature_name) {
-          if (is.data.frame(feature_list)) {
-            return(feature_list)
-          }
-          if (!is.list(feature_list) || length(feature_list) < idx) {
-            stop("Could not select ", feature_name, " branch at index ", idx, ".")
-          }
-          feature_list[[idx]]
+        assert_required_columns(
+          df_feat_grid_d_road,
+          c("gid", "x", "y", "layer", "year"),
+          "df_feat_grid_d_road"
+        )
+        if (anyDuplicated(df_feat_grid_d_road[c("gid", "year")])) {
+          stop("df_feat_grid_d_road must be unique by gid/year.")
         }
 
         align_dynamic_grid_feature <- function(base, feature, feature_cols, feature_name) {
@@ -2171,85 +2339,6 @@ list_process_feature <-
           aligned[, feature_cols, drop = FALSE]
         }
 
-        align_static_grid_feature <- function(base, feature, feature_col, feature_name) {
-          required_cols <- c("gid", "x", "y", "layer", feature_col)
-          missing_base_cols <- setdiff(c("gid", "x", "y", "layer"), names(base))
-          if (length(missing_base_cols) > 0L) {
-            stop(
-              "df_feat_grid_d_road is missing columns for ",
-              feature_name, " merge: ",
-              paste(missing_base_cols, collapse = ", ")
-            )
-          }
-          missing_cols <- setdiff(required_cols, names(feature))
-          if (length(missing_cols) > 0L) {
-            stop(
-              feature_name, " feature is missing columns: ",
-              paste(missing_cols, collapse = ", ")
-            )
-          }
-          if (anyDuplicated(base["gid"]) || anyDuplicated(feature["gid"])) {
-            stop("gid must be unique before merging ", feature_name, ".")
-          }
-          idx <- match(base$gid, feature$gid)
-          if (anyNA(idx)) {
-            stop(feature_name, " feature is missing gid rows from df_feat_grid_d_road.")
-          }
-          aligned <- feature[idx, , drop = FALSE]
-          for (coord_col in c("x", "y", "layer")) {
-            if (!identical(as.vector(base[[coord_col]]), as.vector(aligned[[coord_col]]))) {
-              stop(feature_name, " feature ", coord_col, " values are not aligned.")
-            }
-          }
-          aligned[, feature_col, drop = FALSE] |>
-            dplyr::mutate(dplyr::across(dplyr::all_of(feature_col), as.numeric))
-        }
-
-        static_idx <- which(vapply(
-          list_pred_calc_grid,
-          function(x) {
-            x <- sf::st_drop_geometry(x)
-            is.data.frame(x) &&
-              nrow(x) == n_grid &&
-              all(c("x", "y") %in% names(x)) &&
-              identical(as.numeric(x$x), as.numeric(df_feat_grid_d_road$x)) &&
-              identical(as.numeric(x$y), as.numeric(df_feat_grid_d_road$y))
-          },
-          logical(1)
-        ))
-        if (length(static_idx) != 1L) {
-          stop(
-            "Expected exactly one grid branch matching df_feat_grid_d_road coordinates; matched ",
-            length(static_idx), "."
-          )
-        }
-
-        df_feat_grid_dem <- select_static_grid_branch_by_index(
-          df_feat_grid_dem, static_idx, "df_feat_grid_dem"
-        )
-        df_feat_grid_dsm <- select_static_grid_branch_by_index(
-          df_feat_grid_dsm, static_idx, "df_feat_grid_dsm"
-        )
-        df_feat_grid_mtpi <- select_static_grid_branch_by_index(
-          df_feat_grid_mtpi, static_idx, "df_feat_grid_mtpi"
-        )
-        df_feat_grid_mtpi_1km <- select_static_grid_branch_by_index(
-          df_feat_grid_mtpi_1km, static_idx, "df_feat_grid_mtpi_1km"
-        )
-
-        feature_nrows <- c(
-          dem = nrow(df_feat_grid_dem),
-          dsm = nrow(df_feat_grid_dsm),
-          mtpi = nrow(df_feat_grid_mtpi),
-          mtpi_1km = nrow(df_feat_grid_mtpi_1km)
-        )
-        if (any(feature_nrows != n_grid)) {
-          stop(
-            "Static grid feature row counts are not aligned: ",
-            paste(names(feature_nrows), feature_nrows, sep = "=", collapse = ", ")
-          )
-        }
-
         landuse_cols <- landuse_fixed_terms(int_landuse_radius)
         landuse_aligned <- align_dynamic_grid_feature(
           df_feat_grid_d_road,
@@ -2269,29 +2358,11 @@ list_process_feature <-
           yearly_buffer_mean_terms("blh_yearly", int_landuse_radius),
           "df_feat_grid_blh_yearly"
         )
-        dsm_aligned <- align_static_grid_feature(
+        topo_aligned <- align_dynamic_grid_feature(
           df_feat_grid_d_road,
-          df_feat_grid_dsm,
-          "dsm",
-          "df_feat_grid_dsm"
-        )
-        dem_aligned <- align_static_grid_feature(
-          df_feat_grid_d_road,
-          df_feat_grid_dem,
-          "dem",
-          "df_feat_grid_dem"
-        )
-        mtpi_aligned <- align_static_grid_feature(
-          df_feat_grid_d_road,
-          df_feat_grid_mtpi,
-          "mtpi",
-          "df_feat_grid_mtpi"
-        )
-        mtpi_1km_aligned <- align_static_grid_feature(
-          df_feat_grid_d_road,
-          df_feat_grid_mtpi_1km,
-          "mtpi_1km",
-          "df_feat_grid_mtpi_1km"
+          df_feat_grid_static_topo_yearly,
+          c("dsm", "dem", "mtpi", "mtpi_1km"),
+          "df_feat_grid_static_topo_yearly"
         )
 
         df_res <-
@@ -2300,15 +2371,26 @@ list_process_feature <-
             landuse_aligned,
             aod_aligned,
             blh_aligned,
-            dsm_aligned,
-            dem_aligned,
-            mtpi_aligned,
-            mtpi_1km_aligned
+            topo_aligned
           ) |>
           dplyr::mutate(
             year = as.integer(year_i),
-            d_road = as.numeric(d_road) / 1000
+            d_road = as.numeric(d_road)
           )
+        if (nrow(df_res) != n_grid) {
+          stop(
+            "df_feat_grid_merged row count changed after merge: base=",
+            n_grid, ", merged=", nrow(df_res)
+          )
+        }
+        assert_required_columns(
+          df_res,
+          merged_feature_predictor_terms(int_landuse_radius),
+          "df_feat_grid_merged"
+        )
+        if (anyDuplicated(df_res[c("gid", "year")])) {
+          stop("df_feat_grid_merged must be unique by gid/year.")
+        }
 
         metadata_cols <-
           intersect(
@@ -2324,7 +2406,11 @@ list_process_feature <-
         df_feat_grid_d_road,
         df_feat_grid_landuse,
         df_feat_grid_aod_yearly,
-        df_feat_grid_blh_yearly
+        df_feat_grid_blh_yearly,
+        df_feat_grid_static_topo_yearly
+      ),
+      resources = targets::tar_resources(
+        crew = targets::tar_resources_crew(controller = "controller_20")
       )
     )
   )

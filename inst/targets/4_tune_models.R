@@ -12,7 +12,20 @@ list_fit_models <-
             yearly_buffer_mean_terms("aod_yearly", int_landuse_radius),
             yearly_buffer_mean_terms("blh_yearly", int_landuse_radius)
           )
-        intersect(terms_expected, names(df_feat_correct_merged))
+        if (length(terms_expected) != 113L) {
+          stop(
+            "Expected 113 predictors for chr_terms_x, got ",
+            length(terms_expected), "."
+          )
+        }
+        missing_terms <- setdiff(terms_expected, names(df_feat_correct_merged))
+        if (length(missing_terms) > 0L) {
+          stop(
+            "df_feat_correct_merged is missing expected predictors: ",
+            paste(missing_terms, collapse = ", ")
+          )
+        }
+        terms_expected
       }
     )
     ,
@@ -73,7 +86,8 @@ list_tune_models <-
             formula = form_fit,
             invars = chr_terms_x,
             strata = "spatial",
-            device = "cpu"
+            device = "cpu",
+            nthread = 20L
           )
         attr(res, "year") <- int_years_spatial
         res
@@ -82,7 +96,7 @@ list_tune_models <-
       pattern = map(form_fit),
       iteration = "list",
       resources = targets::tar_resources(
-        crew = targets::tar_resources_crew(controller = "controller_10")
+        crew = targets::tar_resources_crew(controller = "controller_01")
       )
     ),
     targets::tar_target(
@@ -190,13 +204,42 @@ list_tune_models <-
     #   iteration = "list"
     # ),
     targets::tar_target(
+      name = workflow_final_xgb_correct,
+      command = {
+        final_wf <-
+          tune::fit_best(
+            workflow_tune_xgb_correct_spatial,
+            metric = "rmse"
+          )
+        attr(final_wf, "outcome") <- tune::outcome_names(workflow_tune_xgb_correct_spatial)
+        final_wf
+      },
+      pattern = map(workflow_tune_xgb_correct_spatial),
+      iteration = "list",
+      resources = targets::tar_resources(
+        crew = targets::tar_resources_crew(controller = "controller_01")
+      )
+    ),
+    targets::tar_target(
       name = workflow_fit_xgb_correct,
       command = {
-        yvar <- tune::outcome_names(workflow_tune_xgb_correct_spatial)
+        yvar <- attr(workflow_final_xgb_correct, "outcome")
+        if (length(yvar) != 1L || is.na(yvar)) {
+          stop("workflow_final_xgb_correct must have a single outcome attribute.")
+        }
 
         df_combined <-
           df_feat_grid_merged %>%
           sf::st_drop_geometry()
+        n_grid <- nrow(df_combined)
+        required_key_cols <- c("gid", "x", "y", "layer", "year")
+        missing_key_cols <- setdiff(required_key_cols, names(df_combined))
+        if (length(missing_key_cols) > 0L) {
+          stop(
+            "df_feat_grid_merged is missing prediction key columns: ",
+            paste(missing_key_cols, collapse = ", ")
+          )
+        }
         missing_terms <-
           setdiff(
             chr_terms_x,
@@ -224,17 +267,20 @@ list_tune_models <-
           #   .f = dplyr::bind_rows
           # )
         fitted <-
-          tune::fit_best(
-            workflow_tune_xgb_correct_spatial,
-            metric = "rmse"
-          ) %>%
+          workflow_final_xgb_correct %>%
           predict(
             .,
             df_combined
           )
+        if (nrow(fitted) != n_grid) {
+          stop(
+            "workflow_fit_xgb_correct prediction row count changed: input=",
+            n_grid, ", output=", nrow(fitted)
+          )
+        }
         metadata_cols <-
           intersect(
-            c("gid", "x", "y", "year", "X", "Y", "longitude", "latitude", "lon", "lat"),
+            c("gid", "x", "y", "layer", "year", "X", "Y", "longitude", "latitude", "lon", "lat"),
             names(df_combined)
           )
         fitted <-
@@ -245,9 +291,9 @@ list_tune_models <-
         names(fitted)[1] <- yvar
         fitted
       },
-      pattern = cross(workflow_tune_xgb_correct_spatial, df_feat_grid_merged),
+      pattern = cross(workflow_final_xgb_correct, df_feat_grid_merged),
       resources = targets::tar_resources(
-        crew = targets::tar_resources_crew(controller = "controller_08")
+        crew = targets::tar_resources_crew(controller = "controller_04")
       )
     ),
     targets::tar_target(
@@ -296,7 +342,7 @@ list_tune_eval <- list(
     pattern = map(workflow_tune_xgb_correct_spatial),
     iteration = "list",
     resources = targets::tar_resources(
-      crew = targets::tar_resources_crew(controller = "controller_08")
+      crew = targets::tar_resources_crew(controller = "controller_01")
     )
   ),
   # Variable importance from the best model in the tuning results
@@ -367,7 +413,7 @@ list_tune_eval <- list(
     pattern = map(workflow_tune_xgb_correct_spatial),
     iteration = "list",
     resources = targets::tar_resources(
-      crew = targets::tar_resources_crew(controller = "controller_08")
+      crew = targets::tar_resources_crew(controller = "controller_01")
     )
   )
 

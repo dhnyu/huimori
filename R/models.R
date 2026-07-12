@@ -959,7 +959,7 @@ pred_tmb <-
 #' }
 #' @export
 fit_tidy_xgb <-
-  function(data, formula, invars, strata = NULL, nrounds = 1000, device = c("cpu", "cuda")) {
+  function(data, formula, invars, strata = NULL, nrounds = 1000, device = c("cpu", "cuda"), nthread = NULL) {
     device <- match.arg(device)
     xgb_spec <-
       boost_tree(
@@ -968,8 +968,14 @@ fit_tidy_xgb <-
         min_n = tune(),
         tree_depth = tune(),
         learn_rate = tune()
-      ) |>
-      set_engine("xgboost", device = device)
+      )
+    if (is.null(nthread)) {
+      xgb_spec <- xgb_spec |>
+        set_engine("xgboost", device = device)
+    } else {
+      xgb_spec <- xgb_spec |>
+        set_engine("xgboost", device = device, nthread = nthread)
+    }
 
     xgb_rec <-
       recipe(formula, data = data) |>

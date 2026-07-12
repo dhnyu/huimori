@@ -7,3 +7,12 @@ container/*.sif
 **/.snakemake
 **/__pycache__
 daehoon/
+
+# Ignore generated outputs by default
+outputs/**
+
+# Keep prediction map PNGs
+!outputs/
+!outputs/prediction_maps/
+!outputs/prediction_maps/png/
+!outputs/prediction_maps/png/**

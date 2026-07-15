@@ -66,34 +66,43 @@ list_tune_models <-
     targets::tar_target(
       name = workflow_tune_xgb_correct_spatial,
       command = {
-        yvar <- as.character(form_fit)[2]
-        data_sub <- df_feat_correct_merged %>%
-          # dplyr::filter(year == int_years_spatial) %>%
-          .[!is.na(.[[yvar]]), ] %>% # Filter out NA values for the outcome variable
-          dplyr::mutate(site_type = droplevels(site_type))
         data_sub <-
-          data_sub |>
-          dplyr::mutate(
-            latitude = as.double(stringi::stri_extract_first_regex(coords_google, pattern = "[3-4][0-9]\\.[0-9]{2,8}")),
-            longitude = as.double(stringi::stri_extract_last_regex(coords_google, pattern = "1[2-4][0-9]\\.[0-9]{2,8}"))
-          ) |>
-          sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326) |>
-          sf::st_transform(crs = "EPSG:5179")
-
+          prepare_xgb_correct_training_data(
+            data = df_feat_correct_merged,
+            formula = form_fit,
+            target_year = int_years_spatial
+          )
+        resamples_spatial <-
+          make_xgb_spatial_resamples(
+            data = data_sub,
+            v = 5L,
+            method = "snake"
+          )
+        cv_png <-
+          plot_xgb_spatial_folds(
+            data = data_sub,
+            resamples = resamples_spatial,
+            output_dir = file.path("logs", "cv_blocks")
+          )
         res <-
           fit_tidy_xgb(
             data = data_sub,
             formula = form_fit,
             invars = chr_terms_x,
-            strata = "spatial",
+            resamples = resamples_spatial,
+            grid_size = 250L,
+            race_burn_in = 4,
+            race_alpha = 0.01,
+            race_num_ties = 25L,
             device = "cpu",
             nthread = 20L
           )
-        attr(res, "year") <- int_years_spatial
+        attr(res, "target_year") <- attr(data_sub, "target_year")
+        attr(res, "outcome") <- attr(data_sub, "outcome")
+        attr(res, "cv_png") <- cv_png
         res
       },
-      # pattern = cross(int_years_spatial, form_fit),
-      pattern = map(form_fit),
+      pattern = cross(int_years_spatial, form_fit),
       iteration = "list",
       resources = targets::tar_resources(
         crew = targets::tar_resources_crew(controller = "controller_01")
@@ -212,6 +221,7 @@ list_tune_models <-
             metric = "rmse"
           )
         attr(final_wf, "outcome") <- tune::outcome_names(workflow_tune_xgb_correct_spatial)
+        attr(final_wf, "target_year") <- attr(workflow_tune_xgb_correct_spatial, "target_year")
         final_wf
       },
       pattern = map(workflow_tune_xgb_correct_spatial),
@@ -223,75 +233,13 @@ list_tune_models <-
     targets::tar_target(
       name = workflow_fit_xgb_correct,
       command = {
-        yvar <- attr(workflow_final_xgb_correct, "outcome")
-        if (length(yvar) != 1L || is.na(yvar)) {
-          stop("workflow_final_xgb_correct must have a single outcome attribute.")
-        }
-
-        df_combined <-
-          df_feat_grid_merged %>%
-          sf::st_drop_geometry()
-        n_grid <- nrow(df_combined)
-        required_key_cols <- c("gid", "x", "y", "layer", "year")
-        missing_key_cols <- setdiff(required_key_cols, names(df_combined))
-        if (length(missing_key_cols) > 0L) {
-          stop(
-            "df_feat_grid_merged is missing prediction key columns: ",
-            paste(missing_key_cols, collapse = ", ")
-          )
-        }
-        missing_terms <-
-          setdiff(
-            chr_terms_x,
-            names(df_combined)
-          )
-        if (length(missing_terms) > 0) {
-          stop(
-            "df_feat_grid_merged is missing training predictors: ",
-            paste(missing_terms, collapse = ", ")
-          )
-        }
-        if ("year" %in% names(df_combined)) {
-          year_out <- df_combined$year
-        } else {
-          year_out <- NULL
-        }
-
-          #dplyr::filter(!is.na(class_03))
-          # purrr::map(
-          #   .x = .,
-          #   .f = ~ sf::st_drop_geometry(dplyr::select(.x, all_of(chr_terms_x)))
-          # ) %>%
-          # purrr::reduce(
-          #   .x = .,
-          #   .f = dplyr::bind_rows
-          # )
-        fitted <-
-          workflow_final_xgb_correct %>%
-          predict(
-            .,
-            df_combined
-          )
-        if (nrow(fitted) != n_grid) {
-          stop(
-            "workflow_fit_xgb_correct prediction row count changed: input=",
-            n_grid, ", output=", nrow(fitted)
-          )
-        }
-        metadata_cols <-
-          intersect(
-            c("gid", "x", "y", "layer", "year", "X", "Y", "longitude", "latitude", "lon", "lat"),
-            names(df_combined)
-          )
-        fitted <-
-          dplyr::bind_cols(fitted, df_combined[, metadata_cols, drop = FALSE])
-        if (!is.null(year_out)) {
-          fitted <- dplyr::mutate(fitted, year = year_out)
-        }
-        names(fitted)[1] <- yvar
-        fitted
+        predict_grid_with_matching_year_models(
+          grid_data = df_feat_grid_merged,
+          fitted_models = workflow_final_xgb_correct,
+          chr_terms_x = chr_terms_x
+        )
       },
-      pattern = cross(workflow_final_xgb_correct, df_feat_grid_merged),
+      pattern = map(df_feat_grid_merged),
       resources = targets::tar_resources(
         crew = targets::tar_resources_crew(controller = "controller_04")
       )

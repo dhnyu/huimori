@@ -464,10 +464,15 @@ list_process_feature_daily <-
           static_feat <- dplyr::bind_rows(yearly_feat_raw) %>%
             dplyr::filter(year == curr_yr) %>%
             dplyr::select(
-              TMSID, TMSID2, year,
-              d_road, dem, dsm, gw_emission, 
-              starts_with("landuse_"), 
-              mtpi, mtpi_1km
+              dplyr::any_of(c(
+                "TMSID", "TMSID2", "year",
+                "d_road", "dem", "dsm", "gw_emission",
+                "mtpi", "mtpi_1km",
+                "aod_yearly", "blh_yearly"
+              )),
+              dplyr::starts_with("landuse_"),
+              dplyr::starts_with("aod_yearly_"),
+              dplyr::starts_with("blh_yearly_")
             )
           
           res_daily <- res_daily %>% 

@@ -324,22 +324,19 @@ gw_emittors <-
     if (any(weight < 0)) {
       stop("weight contains negative values.")
     }
-    if (!all(sf::st_is_longlat(input) == sf::st_is_longlat(target))) {
-      stop("input and target must have the same coordinate reference system.")
+    if (!identical(sf::st_crs(input), sf::st_crs(target))) {
+      target <- sf::st_transform(target, sf::st_crs(input))
     }
-    if (!all(sf::st_is_longlat(input) == sf::st_is_longlat(clip))) {
-      stop("input and clip must have the same coordinate reference system.")
+    if (!identical(sf::st_crs(input), sf::st_crs(clip))) {
+      clip <- sf::st_transform(clip, sf::st_crs(input))
     }
-    if (!all(sf::st_is_longlat(target) == sf::st_is_longlat(clip))) {
-      stop("target and clip must have the same coordinate reference system.")
-    }
-    if (sf::st_is_longlat(input)) {
+    if (isTRUE(sf::st_is_longlat(input))) {
       input <- sf::st_transform(input, 5179)
     }
-    if (sf::st_is_longlat(target)) {
+    if (isTRUE(sf::st_is_longlat(target))) {
       target <- sf::st_transform(target, 5179)
     }
-    if (sf::st_is_longlat(clip)) {
+    if (isTRUE(sf::st_is_longlat(clip))) {
       clip <- sf::st_transform(clip, 5179)
     }
     sf::st_agr(input) <- "constant"
@@ -357,13 +354,17 @@ gw_emittors <-
       # Subset target by clip
       target_clip <- target[clip, ]
       if (nrow(target_clip) > 0) {
-        # Compute distances between all input points and all target points
-        dists <- sf::st_distance(input[idx_in_clip, ], target_clip)
-        dists <- as.matrix(dists)
-        # For each input point
+        candidates <- sf::st_is_within_distance(
+          input[idx_in_clip, ],
+          target_clip,
+          dist = bw
+        )
+
         for (i in seq_along(idx_in_clip)) {
-          dist_vec <- as.numeric(dists[i, ])
-          if (!all(dist_vec > bw)) {
+          candidate_idx <- candidates[[i]]
+          if (length(candidate_idx) > 0) {
+            target_sub <- target_clip[candidate_idx, ]
+            dist_vec <- as.numeric(sf::st_distance(input[idx_in_clip[i], ], target_sub))
             if (wfun == "gaussian") {
               w <- dnorm(dist_vec / bw)
             } else if (wfun == "exponential") {
@@ -375,10 +376,11 @@ gw_emittors <-
               w <- 0.75 * (1 - (dist_vec / bw)^2)
               w[dist_vec > bw] <- 0
             }
-            w <- w * weight[as.integer(rownames(target_clip))]
-            if (sum(w) != 0) {
+            w <- w * weight[as.integer(rownames(target_sub))]
+            w_sum <- sum(w, na.rm = TRUE)
+            if (!is.na(w_sum) && w_sum != 0) {
               gw_emission[idx_in_clip[i]] <-
-                sum(target_clip$emission * w) / sum(w)
+                sum(target_sub$emission * w, na.rm = TRUE) / w_sum
             }
           }
         }
@@ -387,5 +389,3 @@ gw_emittors <-
     input$gw_emission <- gw_emission
     return(sf::st_drop_geometry(input))
   }
-
-

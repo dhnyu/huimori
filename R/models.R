@@ -931,7 +931,12 @@ pred_tmb <-
 #' @param formula A formula specifying the model.
 #' @param invars A character vector of input variable names (not directly used in the function, but included for interface consistency).
 #' @param strata An optional character vector specifying the stratification variable for cross-validation. If `NULL`, no stratification is applied.
+#' @param resamples Optional rsample object. If supplied, this is used directly instead of creating resamples from `strata`.
 #' @param nrounds Integer. Number of boosting rounds (trees) for XGBoost. Default is 1000.
+#' @param grid_size Integer. Number of space-filling hyperparameter candidates.
+#' @param race_burn_in Integer. Number of resamples evaluated before racing can eliminate candidates.
+#' @param race_alpha Numeric. Significance level for ANOVA racing.
+#' @param race_num_ties Integer. Number of statistically tied candidates retained by racing.
 #' @param device Character. Device to use for XGBoost training, either "cpu" or "cuda". Default is "cpu".
 #' @return A `tune_race_anova` object containing the tuning results.
 #'
@@ -959,7 +964,20 @@ pred_tmb <-
 #' }
 #' @export
 fit_tidy_xgb <-
-  function(data, formula, invars, strata = NULL, nrounds = 1000, device = c("cpu", "cuda")) {
+  function(
+    data,
+    formula,
+    invars,
+    strata = NULL,
+    resamples = NULL,
+    nrounds = 1000,
+    grid_size = 100L,
+    race_burn_in = 3,
+    race_alpha = 0.05,
+    race_num_ties = 10,
+    device = c("cpu", "cuda"),
+    nthread = NULL
+  ) {
     device <- match.arg(device)
     xgb_spec <-
       boost_tree(
@@ -968,14 +986,20 @@ fit_tidy_xgb <-
         min_n = tune(),
         tree_depth = tune(),
         learn_rate = tune()
-      ) |>
-      set_engine("xgboost", device = device)
+      )
+    if (is.null(nthread)) {
+      xgb_spec <- xgb_spec |>
+        set_engine("xgboost", device = device)
+    } else {
+      xgb_spec <- xgb_spec |>
+        set_engine("xgboost", device = device, nthread = nthread)
+    }
 
     xgb_rec <-
       recipe(formula, data = data) |>
-      recipes::step_zv(all_predictors()) |>
+      recipes::step_zv(recipes::all_predictors()) |>
       # step_pca(starts_with("class_"), num_comp = 3) |>
-      step_normalize(all_predictors())
+      recipes::step_normalize(recipes::all_predictors())
 
     xgb_wf <-
       workflow() |>
@@ -984,12 +1008,12 @@ fit_tidy_xgb <-
 
     tuneset <-
       hardhat::extract_parameter_set_dials(xgb_wf) |>
-      dials::grid_space_filling(
-        min_n(c(3, 31)),
-        tree_depth(c(3, 10)),
-        learn_rate(range = c(-4, -1), trans = transform_log10()),
-        size = 100
-      )
+      update(
+        min_n = min_n(c(3, 31)),
+        tree_depth = tree_depth(c(3, 10)),
+        learn_rate = learn_rate(range = c(-4, -1), trans = transform_log10())
+      ) |>
+      dials::grid_space_filling(size = grid_size)
 
     mset <- yardstick::metric_set(
           yardstick::rmse, yardstick::mae)
@@ -998,13 +1022,17 @@ fit_tidy_xgb <-
       verbose = TRUE,
       verbose_elim = TRUE,
       save_pred = TRUE,
-      save_workflow = TRUE
+      save_workflow = TRUE,
+      burn_in = as.numeric(race_burn_in),
+      alpha = as.numeric(race_alpha),
+      num_ties = as.numeric(race_num_ties)
     )
 
-    if (is.null(strata)) {
+    if (!is.null(resamples)) {
+      stratified <- resamples
+    } else if (is.null(strata)) {
       stratified <- rsample::vfold_cv(data = data, v = 5)
-    }
-    if (strata == "spatial") {
+    } else if (identical(strata, "spatial")) {
       stratified <- spatialsample::spatial_block_cv(data = data, method = "snake", v = 5)
     } else if (is.character(strata)) {
       stratified <- rsample::group_vfold_cv(data = data, group = strata, v = NULL)
@@ -1020,14 +1048,14 @@ fit_tidy_xgb <-
             control = topt
           )
       }, error = function(e) {
-        stratified <- rsample::vfold_cv(data = data, v = 5)
+        stratified_fallback <- if (!is.null(resamples)) resamples else rsample::vfold_cv(data = data, v = 5)
         wf_tune <-
           xgb_wf |>
-          finetune::tune_race_anova(
-            resamples = stratified,
+          tune::tune_grid(
+            resamples = stratified_fallback,
             grid = tuneset,
             metrics = mset,
-            control = topt
+            control = tune::control_grid(save_pred = TRUE, save_workflow = TRUE)
           )
         attr(wf_tune, "error") <- e
         wf_tune
@@ -1086,9 +1114,9 @@ fit_tidy_lgb <-
 
     lgb_rec <-
       recipe(formula, data = data) |>
-      recipes::step_zv(all_predictors()) |>
+      recipes::step_zv(recipes::all_predictors()) |>
       # step_pca(starts_with("class_"), num_comp = 3) |>
-      step_normalize(all_predictors())
+      recipes::step_normalize(recipes::all_predictors())
 
     lgb_wf <-
       workflow() |>
@@ -1097,12 +1125,12 @@ fit_tidy_lgb <-
 
     tuneset <-
       hardhat::extract_parameter_set_dials(lgb_wf) |>
-      dials::grid_space_filling(
-        min_n(c(3, 10)),
-        tree_depth(c(3, 10)),
-        learn_rate(range = c(-4, -1), trans = transform_log10()),
-        size = 50
-      )
+      update(
+        min_n = min_n(c(3, 10)),
+        tree_depth = tree_depth(c(3, 10)),
+        learn_rate = learn_rate(range = c(-4, -1), trans = transform_log10())
+      ) |>
+      dials::grid_space_filling(size = 50)
 
     mset <- yardstick::metric_set(
           yardstick::rmse, yardstick::mae)
@@ -1116,22 +1144,34 @@ fit_tidy_lgb <-
 
     if (is.null(strata)) {
       stratified <- rsample::vfold_cv(data = data, v = 5)
-    }
-    if (is.character(strata)) {
-      stratified <- rsample::group_vfold_cv(data = data, group = strata, v = NULL)
-    }
-    if (strata == "spatial") {
+    } else if (identical(strata, "spatial")) {
       stratified <- spatialsample::spatial_block_cv(data = data, method = "snake", v = 5)
+    } else if (is.character(strata)) {
+      stratified <- rsample::group_vfold_cv(data = data, group = strata, v = NULL)
     }
 
     lgb_res <-
-      lgb_wf |>
-      finetune::tune_race_anova(
-        resamples = stratified,
-        grid = tuneset,
-        metrics = mset,
-        control = topt
-      )
+      tryCatch({
+        lgb_wf |>
+          finetune::tune_race_anova(
+            resamples = stratified,
+            grid = tuneset,
+            metrics = mset,
+            control = topt
+          )
+      }, error = function(e) {
+        stratified <- rsample::vfold_cv(data = data, v = 5)
+        wf_tune <-
+          lgb_wf |>
+          tune::tune_grid(
+            resamples = stratified,
+            grid = tuneset,
+            metrics = mset,
+            control = tune::control_grid(save_pred = TRUE, save_workflow = TRUE)
+          )
+        attr(wf_tune, "error") <- e
+        wf_tune
+      })
 
     return(lgb_res)
   }

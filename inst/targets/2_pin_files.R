@@ -138,9 +138,7 @@ list_basefiles <-
     ),
     targets::tar_target(
       name = chr_dir_aod,
-      command = {
-        file.path(chr_dir_data, "airquality", "aod")
-      }
+      command = canonical_aod_processed_dir()
     ),
     ## B12. ERA5 ####
     targets::tar_target(

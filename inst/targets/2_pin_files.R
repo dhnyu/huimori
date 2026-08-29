@@ -140,6 +140,11 @@ list_basefiles <-
       name = chr_dir_aod,
       command = canonical_aod_processed_dir()
     ),
+    ## B11-1. KMA daily grid directory ####
+    targets::tar_target(
+      name = chr_dir_kma_daily,
+      command = file.path(chr_dir_kma, "daily")
+    ),
     ## B12. ERA5 ####
     targets::tar_target(
       name = chr_dir_climate,
